@@ -101,6 +101,7 @@ def _channel_list() -> list[dict]:
 _cache: dict = {}
 _cache_lock = threading.Lock()
 CACHE_TTL = 1800  # 30분
+QUALITY_LOG_INTERVAL = 30
 CDN_TYPE_MAPPING = {
     "gs_cdn": "gs_cdn_pc_web",
     "lg_cdn": "lg_cdn_pc_web",
@@ -109,6 +110,9 @@ CHANNEL_API_URL = "https://live.sooplive.com/afreeca/player_live_api.php"
 _http_lock = threading.Lock()
 _http_shared_session: requests.Session | None = None
 _http_shared_proxy: str | None = None
+_quality_state_lock = threading.Lock()
+_channel_quality: dict[str, str] = {}
+_quality_log_last_ts: dict[str, float] = {}
 
 
 # ─── 설정 헬퍼 ───────────────────────────────────────────────────────────────
@@ -327,7 +331,8 @@ def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
 
     # 1) 이미 완전한 m3u8 URL이면 그대로 사용
     if hls_url.startswith("http") and _looks_like_m3u8_url(hls_url):
-        logger.info("[SOOP_KBO] 직접 m3u8 URL 사용")
+        with _quality_state_lock:
+            _channel_quality[bj_id] = "direct"
         return hls_url
 
     # 2) streamlink soop 플러그인 방식: type=aid + broad_stream_assign
@@ -359,7 +364,8 @@ def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
                     continue
                 final_url = f"{view_url}{'&' if '?' in view_url else '?'}aid={aid}"
                 if _probe_m3u8_url(sess, final_url):
-                    logger.info("[SOOP_KBO] stream_assign 성공 quality=%s", quality)
+                    with _quality_state_lock:
+                        _channel_quality[bj_id] = quality
                     return final_url
             except Exception:
                 logger.exception("[SOOP_KBO] stream_assign 실패 quality=%s", quality)
@@ -520,21 +526,16 @@ def soop_kbo_playlist():
 
 @blueprint.route("/channel/<channel_id>.m3u8")
 def soop_kbo_channel(channel_id: str):
-    logger.info("[SOOP_KBO] 채널 요청: %s", channel_id)
     urls = _load_channel_urls()
     if channel_id not in urls:
         abort(404)
     try:
         hls_url = _get_hls_url(channel_id)
-        logger.info("[SOOP_KBO] HLS URL: %.120s", hls_url)
-
         sess = _http_session()
         resp = sess.get(hls_url, timeout=15)
-        logger.info("[SOOP_KBO] m3u8 응답: status=%s content-type=%s", resp.status_code, resp.headers.get("Content-Type"))
         resp.raise_for_status()
 
         rewritten = _rewrite_m3u8(resp.text, hls_url, channel_id)
-        logger.info("[SOOP_KBO] m3u8 재작성 완료 (%d bytes)", len(rewritten))
         return Response(rewritten, content_type="application/vnd.apple.mpegurl")
     except Exception:
         logger.exception("[SOOP_KBO] 채널 오류: %s", channel_id)
@@ -565,7 +566,7 @@ def soop_kbo_sub():
 
 @blueprint.route("/seg")
 def soop_kbo_seg():
-    logger.info("[SOOP_KBO] 세그먼트 요청 from %s", request.remote_addr)
+    channel_id = request.args.get("c", "")
     encoded = request.args.get("url", "")
     if not encoded:
         abort(400)
@@ -574,6 +575,15 @@ def soop_kbo_seg():
     except Exception:
         abort(400)
     try:
+        if channel_id:
+            now = time.time()
+            with _quality_state_lock:
+                last = _quality_log_last_ts.get(channel_id, 0.0)
+                if now - last >= QUALITY_LOG_INTERVAL:
+                    quality = _channel_quality.get(channel_id, "unknown")
+                    logger.info("[SOOP_KBO] 채널=%s 재생품질=%s", channel_id, quality)
+                    _quality_log_last_ts[channel_id] = now
+
         sess = _http_session()
         resp = sess.get(url, stream=True, timeout=30)
         resp.raise_for_status()
