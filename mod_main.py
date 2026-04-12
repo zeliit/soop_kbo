@@ -101,6 +101,10 @@ def _channel_list() -> list[dict]:
 _cache: dict = {}
 _cache_lock = threading.Lock()
 CACHE_TTL = 1800  # 30분
+CDN_TYPE_MAPPING = {
+    "gs_cdn": "gs_cdn_pc_web",
+    "lg_cdn": "lg_cdn_pc_web",
+}
 
 
 # ─── 설정 헬퍼 ───────────────────────────────────────────────────────────────
@@ -153,6 +157,56 @@ def _probe_m3u8_url(sess: requests.Session, url: str) -> bool:
         return False
 
 
+def _normalize_return_type(cdn: str) -> str:
+    """SOOP CDN 타입을 broad_stream_assign용 타입으로 정규화."""
+    for key, mapped in CDN_TYPE_MAPPING.items():
+        if key in (cdn or ""):
+            return mapped
+    return cdn or "gs_cdn_pc_web"
+
+
+def _get_aid(sess: requests.Session, bj_id: str, bno: str, quality: str) -> str | None:
+    """type=aid API로 aid 토큰 획득."""
+    api_url = "https://live.sooplive.co.kr/afreeca/player_live_api.php"
+    payload = {
+        "bid": bj_id,
+        "bno": bno,
+        "type": "aid",
+        "quality": quality,
+        "mode": "landing",
+        "player_type": "html5",
+        "stream_type": "common",
+        "from_api": "0",
+        "pwd": "",
+    }
+    resp = sess.post(api_url, data=payload, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, dict):
+        return None
+    channel = data.get("CHANNEL", {}) if isinstance(data.get("CHANNEL"), dict) else {}
+    result = channel.get("RESULT")
+    if result in (1, "1"):
+        return channel.get("AID")
+    return None
+
+
+def _get_view_url(sess: requests.Session, rmd: str, cdn: str, bno: str, quality: str) -> str | None:
+    """broad_stream_assign.html 호출로 m3u8 view_url 획득."""
+    rmd_base = rmd if rmd.startswith("http") else f"https://{rmd}"
+    rmd_base = rmd_base.rstrip("/")
+    params = {
+        "return_type": _normalize_return_type(cdn),
+        "broad_key": f"{bno}-common-{quality}-hls",
+    }
+    resp = sess.get(f"{rmd_base}/broad_stream_assign.html", params=params, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, dict):
+        return data.get("view_url")
+    return None
+
+
 def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
     """SOOP 방송국 API에서 HLS URL 획득."""
     bj_id = _parse_bj_id(page_url)
@@ -176,6 +230,7 @@ def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
         "Origin": "https://play.sooplive.co.kr",
         "Content-Type": "application/x-www-form-urlencoded",
     }
+    sess.headers.update({"Referer": page_url, "Origin": "https://play.sooplive.co.kr"})
     resp = sess.post(api_url, data=payload, headers=headers, timeout=15)
     resp.raise_for_status()
     data = resp.json()
@@ -222,41 +277,47 @@ def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
         raise RuntimeError(f"HLS URL을 찾을 수 없음. CHANNEL keys: {list(channel.keys())}")
 
     bno = str(channel.get("BNO", "")).strip()
-    # SOOP 응답마다 토큰 키가 달라서 가능한 키를 순차 확인
-    aid = (
-        str(channel.get("AUTH_KEY", "")).strip()
-        or str(channel.get("AID", "")).strip()
-        or str(channel.get("FTK", "")).strip()
-    )
+    cdn = str(channel.get("CDN", "")).strip()
+    viewpreset = channel.get("VIEWPRESET") or []
 
     # 1) 이미 완전한 m3u8 URL이면 그대로 사용
     if hls_url.startswith("http") and _looks_like_m3u8_url(hls_url):
         logger.info("[SOOP_KBO] 직접 m3u8 URL 사용")
         return hls_url
 
-    # 2) 도메인/호스트만 내려오는 케이스 보강
-    host = hls_url
-    if not host.startswith("http"):
-        host = f"https://{host}"
-    host = host.rstrip("/")
+    # 2) streamlink soop 플러그인 방식: type=aid + broad_stream_assign
+    # viewpreset 품질 우선순위: original 우선, 없으면 나머지
+    qualities = []
+    if isinstance(viewpreset, list):
+        for item in viewpreset:
+            if isinstance(item, dict):
+                q = item.get("name")
+                if q and q != "auto":
+                    qualities.append(q)
+    if "original" in qualities:
+        qualities = ["original"] + [q for q in qualities if q != "original"]
+    if not qualities:
+        qualities = ["original", "hd", "sd"]
 
-    candidates = []
-    if bno:
-        base_path = f"/live/{bj_id}_{bno}/original/hls/playlist.m3u8"
-        if aid:
-            candidates.append(f"{host}{base_path}?aid={aid}")
-        candidates.append(f"{host}{base_path}")
-        candidates.append(f"{host}/live/{bj_id}_{bno}/playlist.m3u8")
-        candidates.append(f"{host}/live/{bj_id}_{bno}/master.m3u8")
+    if bno and hls_url:
+        for quality in qualities:
+            try:
+                aid = _get_aid(sess, bj_id, bno, quality)
+                if not aid:
+                    continue
+                view_url = _get_view_url(sess, hls_url, cdn, bno, quality)
+                if not view_url:
+                    continue
+                final_url = f"{view_url}{'&' if '?' in view_url else '?'}aid={aid}"
+                if _probe_m3u8_url(sess, final_url):
+                    logger.info("[SOOP_KBO] stream_assign 성공 quality=%s", quality)
+                    return final_url
+            except Exception:
+                logger.exception("[SOOP_KBO] stream_assign 실패 quality=%s", quality)
 
-    logger.info("[SOOP_KBO] HLS 후보 URL 개수: %d", len(candidates))
-    for cand in candidates:
-        if _probe_m3u8_url(sess, cand):
-            logger.info("[SOOP_KBO] HLS 후보 성공: %.120s", cand)
-            return cand
-
-    # 3) 마지막 fallback: 원본 값 반환 (아래 단계에서 상세 HTTP 오류 확인 가능)
-    logger.warning("[SOOP_KBO] HLS 후보 탐색 실패, 원본 URL fallback: %.120s", host)
+    # 3) 마지막 fallback
+    host = hls_url if hls_url.startswith("http") else f"https://{hls_url}"
+    logger.warning("[SOOP_KBO] stream_assign 실패, 원본 URL fallback: %.120s", host)
     hls_url = host
 
     logger.info("[SOOP_KBO] HLS URL: %.120s", hls_url)
