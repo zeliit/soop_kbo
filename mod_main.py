@@ -50,10 +50,13 @@ CACHE_TTL = 1800  # 30분
 # ─── 설정 헬퍼 ───────────────────────────────────────────────────────────────
 def _proxy_url() -> str | None:
     try:
-        if ModelSetting.get_bool("proxy_use"):
-            return ModelSetting.get("proxy_url") or None
+        use = ModelSetting.get_bool("proxy_use")
+        url = ModelSetting.get("proxy_url") or None
+        logger.info("[SOOP_KBO] proxy_use=%s proxy_url=%s", use, url)
+        if use:
+            return url
     except Exception:
-        pass
+        logger.exception("[SOOP_KBO] proxy 설정 읽기 실패")
     return None
 
 
@@ -182,6 +185,7 @@ class ModuleMain(PluginModuleBase):
 
     def process_ajax(self, sub, req):
         from flask import jsonify
+        logger.info("[SOOP_KBO] process_ajax sub=%s", sub)
         try:
             if sub == "setting_save":
                 saved, _ = P.ModelSetting.setting_save(req)
@@ -232,21 +236,24 @@ def soop_kbo_playlist():
 
 @blueprint.route("/channel/<channel_id>.m3u8")
 def soop_kbo_channel(channel_id: str):
+    logger.info("[SOOP_KBO] 채널 요청: %s", channel_id)
     if channel_id not in KBO_CHANNELS:
         abort(404)
     try:
         stream = _get_stream(channel_id)
         hls_url = _get_hls_url(stream)
-        logger.info("[SOOP_KBO] HLS URL: %.80s", hls_url)
+        logger.info("[SOOP_KBO] HLS URL: %.120s", hls_url)
 
+        purl = _proxy_url()
+        logger.info("[SOOP_KBO] m3u8 fetch 프록시: %s", purl or "없음(직접접속)")
         sess = _http_session()
         resp = sess.get(hls_url, timeout=15)
+        logger.info("[SOOP_KBO] m3u8 응답: status=%s content-type=%s", resp.status_code, resp.headers.get("Content-Type"))
         resp.raise_for_status()
 
-        return Response(
-            _rewrite_m3u8(resp.text, hls_url, channel_id),
-            content_type="application/vnd.apple.mpegurl",
-        )
+        rewritten = _rewrite_m3u8(resp.text, hls_url, channel_id)
+        logger.info("[SOOP_KBO] m3u8 재작성 완료 (%d bytes)", len(rewritten))
+        return Response(rewritten, content_type="application/vnd.apple.mpegurl")
     except Exception:
         logger.exception("[SOOP_KBO] 채널 오류: %s", channel_id)
         with _cache_lock:
@@ -276,6 +283,7 @@ def soop_kbo_sub():
 
 @blueprint.route("/seg")
 def soop_kbo_seg():
+    logger.info("[SOOP_KBO] 세그먼트 요청 from %s", request.remote_addr)
     encoded = request.args.get("url", "")
     if not encoded:
         abort(400)
