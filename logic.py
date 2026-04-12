@@ -49,10 +49,9 @@ CACHE_TTL = 1800  # 30분
 
 # ─── 설정 헬퍼 ───────────────────────────────────────────────────────────────
 def _proxy_url() -> str | None:
-    """alive의 streamlink 프록시 설정을 재사용."""
     try:
-        if ModelSetting.get_bool("streamlink_use_proxy"):
-            return ModelSetting.get("streamlink_proxy_url") or None
+        if ModelSetting.get_bool("proxy_use"):
+            return ModelSetting.get("proxy_url") or None
     except Exception:
         pass
     return None
