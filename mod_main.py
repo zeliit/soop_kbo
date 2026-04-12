@@ -16,6 +16,7 @@ streamlink 없이 SOOP API를 직접 호출합니다.
   channel_urls : JSON (채널 ID → URL 매핑)
 """
 import json
+import os
 import re
 import threading
 import time
@@ -33,6 +34,24 @@ package_name = P.package_name
 ModelSetting = P.ModelSetting
 blueprint = P.blueprint
 SystemModelSetting = F.SystemModelSetting
+PLUGIN_VERSION = "unknown"
+
+
+def _load_plugin_version() -> str:
+    """info.yaml에서 버전을 읽어 UI/로그에 노출."""
+    try:
+        info_path = os.path.join(os.path.dirname(__file__), "info.yaml")
+        with open(info_path, encoding="utf-8") as fp:
+            text = fp.read()
+        m = re.search(r'^\s*version\s*:\s*"([^"]+)"\s*$', text, flags=re.MULTILINE)
+        if m:
+            return m.group(1).strip()
+    except Exception:
+        logger.exception("[SOOP_KBO] info.yaml 버전 로드 실패")
+    return "unknown"
+
+
+PLUGIN_VERSION = _load_plugin_version()
 
 # ─── 채널 기본 목록 ───────────────────────────────────────────────────────────
 DEFAULT_CHANNEL_URLS = {
@@ -251,6 +270,7 @@ class ModuleMain(PluginModuleBase):
         try:
             arg = P.ModelSetting.to_dict()
             arg["package_name"] = P.package_name
+            arg["plugin_version"] = PLUGIN_VERSION
             arg["playlist_url"] = f"{SystemModelSetting.get('ddns')}/{P.package_name}/playlist.m3u8"
             arg["default_channel_urls"] = json.dumps(DEFAULT_CHANNEL_URLS, ensure_ascii=False, indent=2)
             return render_template(f"{P.package_name}_{self.name}_{sub}.html", arg=arg)
@@ -300,7 +320,7 @@ class ModuleMain(PluginModuleBase):
 @blueprint.route("/playlist.m3u8")
 def soop_kbo_playlist():
     pb = _proxy_base()
-    lines = ["#EXTM3U"]
+    lines = ["#EXTM3U", f"# SOOP_KBO_VERSION={PLUGIN_VERSION}"]
     for idx, ch in enumerate(_channel_list(), 1):
         lines.append(
             f'#EXTINF:-1 tvg-id="{ch["id"]}" tvg-name="{ch["name"]}" '

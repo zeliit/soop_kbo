@@ -2,6 +2,7 @@
 {% block content %}
 
 <div>
+  <div class="mb-2 text-muted small">Plugin Version: {{ arg['plugin_version'] }}</div>
   {{ macros.m_button_group([['localSettingSaveBtn', '설정 저장']])}}
 
   <form id='setting' name='setting'>
