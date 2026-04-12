@@ -2,6 +2,7 @@
 SOOP KBO HLS Proxy Plugin
 =========================
 SOOP KBO 스트림을 HLS 프록시로 제공합니다.
+streamlink 없이 SOOP API를 직접 호출합니다.
 
 [ 엔드포인트 ]
   /soop_kbo/playlist.m3u8          - Plex / IPTV 플레이리스트
@@ -11,9 +12,10 @@ SOOP KBO 스트림을 HLS 프록시로 제공합니다.
   /soop_kbo/cache/clear            - 스트림 캐시 초기화
 
 [ 설정 ]
-  proxy_use  : true / false
-  proxy_url  : http://user:pass@host:port
+  proxy_url  : http://user:pass@host:port (필수)
+  channel_urls : JSON (채널 ID → URL 매핑)
 """
+import json
 import re
 import threading
 import time
@@ -32,14 +34,49 @@ ModelSetting = P.ModelSetting
 blueprint = P.blueprint
 SystemModelSetting = F.SystemModelSetting
 
-# ─── 채널 목록 ────────────────────────────────────────────────────────────────
-KBO_CHANNELS = {
-    "kboglobal1": {"name": "SOOP KBO1", "url": "https://play.sooplive.co.kr/kboglobal/1"},
-    "kboglobal2": {"name": "SOOP KBO2", "url": "https://play.sooplive.co.kr/kboglobal/2"},
-    "kboglobal3": {"name": "SOOP KBO3", "url": "https://play.sooplive.co.kr/kboglobal/3"},
-    "kboglobal4": {"name": "SOOP KBO4", "url": "https://play.sooplive.co.kr/kboglobal/4"},
-    "kboglobal5": {"name": "SOOP KBO5", "url": "https://play.sooplive.co.kr/kboglobal/5"},
+# ─── 채널 기본 목록 ───────────────────────────────────────────────────────────
+DEFAULT_CHANNEL_URLS = {
+    "kboglobal1": "https://play.sooplive.co.kr/kboglobal1",
+    "kboglobal2": "https://play.sooplive.co.kr/kboglobal2",
+    "kboglobal3": "https://play.sooplive.co.kr/kboglobal3",
+    "kboglobal4": "https://play.sooplive.co.kr/kboglobal4",
+    "kboglobal5": "https://play.sooplive.co.kr/kboglobal5",
 }
+
+CHANNEL_NAMES = {
+    "kboglobal1": "SOOP KBO1",
+    "kboglobal2": "SOOP KBO2",
+    "kboglobal3": "SOOP KBO3",
+    "kboglobal4": "SOOP KBO4",
+    "kboglobal5": "SOOP KBO5",
+}
+
+
+def _load_channel_urls() -> dict:
+    """DB에서 채널 URL을 로드. 없으면 기본값 반환."""
+    try:
+        raw = ModelSetting.get("channel_urls") or ""
+        if raw.strip():
+            data = json.loads(raw)
+            if isinstance(data, dict) and data:
+                return data
+    except Exception:
+        logger.exception("[SOOP_KBO] channel_urls 파싱 실패, 기본값 사용")
+    return dict(DEFAULT_CHANNEL_URLS)
+
+
+def _channel_list() -> list[dict]:
+    """채널 목록 반환 (id, name, url)."""
+    urls = _load_channel_urls()
+    result = []
+    for ch_id, url in urls.items():
+        result.append({
+            "id": ch_id,
+            "name": CHANNEL_NAMES.get(ch_id, ch_id),
+            "url": url,
+        })
+    return result
+
 
 # ─── 스트림 캐시 ──────────────────────────────────────────────────────────────
 _cache: dict = {}
@@ -48,16 +85,15 @@ CACHE_TTL = 1800  # 30분
 
 
 # ─── 설정 헬퍼 ───────────────────────────────────────────────────────────────
-def _proxy_url() -> str | None:
-    try:
-        use = ModelSetting.get_bool("proxy_use")
-        url = ModelSetting.get("proxy_url") or None
-        logger.info("[SOOP_KBO] proxy_use=%s proxy_url=%s", use, url)
-        if use:
-            return url
-    except Exception:
-        logger.exception("[SOOP_KBO] proxy 설정 읽기 실패")
-    return None
+def _required_proxy_url() -> str:
+    """SOOP KBO는 해외 IP가 필요하므로 프록시를 필수로 강제."""
+    purl = (ModelSetting.get("proxy_url") or "").strip()
+    if not purl:
+        raise RuntimeError(
+            "[SOOP_KBO] proxy_url 미설정. "
+            "SOOP KBO는 해외 프록시가 필수입니다."
+        )
+    return purl
 
 
 def _http_session() -> requests.Session:
@@ -67,54 +103,91 @@ def _http_session() -> requests.Session:
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
     )
-    if purl := _proxy_url():
-        sess.proxies.update({"http": purl, "https": purl})
+    purl = _required_proxy_url()
+    sess.proxies.update({"http": purl, "https": purl})
     return sess
 
 
+# ─── SOOP API 직접 호출 ───────────────────────────────────────────────────────
+def _parse_bj_id(page_url: str) -> str:
+    """https://play.sooplive.co.kr/<bjid> 또는 www.sooplive.co.kr/<bjid> 에서 BJ ID 추출."""
+    path = urlparse(page_url).path.strip("/")
+    # path 예: "kboglobal1" 또는 "kboglobal1/1" → 첫 번째 세그먼트
+    return path.split("/")[0]
+
+
+def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
+    """SOOP 방송국 API에서 HLS URL 획득."""
+    bj_id = _parse_bj_id(page_url)
+    logger.info("[SOOP_KBO] BJ ID: %s / page_url: %s", bj_id, page_url)
+
+    # 1) 라이브 정보 API
+    api_url = "https://live.sooplive.co.kr/afreeca/player_live_api.php"
+    payload = {
+        "bid": bj_id,
+        "type": "live",
+        "quality": "original",
+        "player_type": "html5",
+        "mode": "landing",
+        "from_api": "0",
+        "pwd": "",
+        "stream_type": "common",
+        "is_revive": "false",
+    }
+    headers = {
+        "Referer": page_url,
+        "Origin": "https://play.sooplive.co.kr",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    resp = sess.post(api_url, data=payload, headers=headers, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    logger.info("[SOOP_KBO] API 응답 result: %s", data.get("result"))
+
+    # result=1: 방송 중, result=-6: 방송 없음 등
+    result_code = data.get("result", 0)
+    if result_code != 1:
+        raise RuntimeError(f"SOOP API result={result_code}: 방송 중이 아니거나 오류 ({bj_id})")
+
+    channel = data.get("CHANNEL", {})
+    hls_url = channel.get("RMD") or channel.get("CDN") or ""
+    if not hls_url:
+        # CDN 목록에서 직접 구성
+        cdn_list = channel.get("CDN_LIST", [])
+        logger.info("[SOOP_KBO] CDN_LIST: %s", cdn_list)
+        raise RuntimeError(f"HLS URL을 찾을 수 없음. CHANNEL keys: {list(channel.keys())}")
+
+    # RMD 값이 전체 m3u8 URL이면 그대로 사용, 아니면 조합
+    if not hls_url.startswith("http"):
+        bno = channel.get("BNO", "")
+        auth_key = channel.get("AUTH_KEY", "")
+        hls_url = f"https://{hls_url}/live/{bj_id}_{bno}/original/hls/playlist.m3u8?aid={auth_key}"
+
+    logger.info("[SOOP_KBO] HLS URL: %.120s", hls_url)
+    return hls_url
+
+
 # ─── 스트림 관리 ─────────────────────────────────────────────────────────────
-def _get_stream(channel_id: str):
-    """스트림 캐시에서 가져오거나 streamlink로 새로 획득."""
+def _get_hls_url(channel_id: str) -> str:
+    """캐시에서 HLS URL을 가져오거나 SOOP API로 새로 획득."""
     with _cache_lock:
         if channel_id in _cache:
-            stream, cached_at = _cache[channel_id]
+            hls_url, cached_at = _cache[channel_id]
             if time.time() - cached_at < CACHE_TTL:
-                return stream
+                return hls_url
             del _cache[channel_id]
 
-    from streamlink import Streamlink  # type: ignore # pylint: disable=import-error
+    urls = _load_channel_urls()
+    if channel_id not in urls:
+        raise KeyError(f"알 수 없는 채널: {channel_id}")
+    page_url = urls[channel_id]
 
-    ch = KBO_CHANNELS[channel_id]
-    sl = Streamlink()
-    if purl := _proxy_url():
-        sl.set_option("http-proxy", purl)
+    sess = _http_session()
+    hls_url = _get_hls_url_from_api(page_url, sess)
 
-    logger.info("[SOOP_KBO] 스트림 획득 중: %s", ch["url"])
-    streams = sl.streams(ch["url"])
-    if not streams:
-        raise RuntimeError(f"스트림 없음: {ch['url']}")
-    stream = streams.get("best")
-    if stream is None:
-        raise RuntimeError(f"best 스트림 없음. 가능한 품질: {list(streams)}")
-
-    logger.info("[SOOP_KBO] 스트림 획득 성공: %s / %s", channel_id, type(stream).__name__)
     with _cache_lock:
-        _cache[channel_id] = (stream, time.time())
-    return stream
-
-
-def _get_hls_url(stream) -> str:
-    try:
-        from streamlink.stream.hls import MuxedHLSStream  # type: ignore # pylint: disable=import-error
-
-        if isinstance(stream, MuxedHLSStream):
-            logger.info("[SOOP_KBO] MuxedHLSStream - 비디오 서브스트림 사용")
-            return stream.substreams[0].url
-    except (ImportError, AttributeError, IndexError):
-        pass
-    if hasattr(stream, "url"):
-        return stream.url
-    raise NotImplementedError(f"지원하지 않는 스트림 타입: {type(stream).__name__}")
+        _cache[channel_id] = (hls_url, time.time())
+    return hls_url
 
 
 # ─── M3U8 처리 ───────────────────────────────────────────────────────────────
@@ -169,15 +242,17 @@ class ModuleMain(PluginModuleBase):
     def __init__(self, P):
         super(ModuleMain, self).__init__(P, name="main", first_menu="setting")
         self.db_default = {
-            "proxy_use": "False",
+            "proxy_use": "True",
             "proxy_url": "",
+            "channel_urls": json.dumps(DEFAULT_CHANNEL_URLS, ensure_ascii=False),
         }
 
-    def process_menu(self, sub, req):
+    def process_menu(self, sub, _req):
         try:
             arg = P.ModelSetting.to_dict()
             arg["package_name"] = P.package_name
             arg["playlist_url"] = f"{SystemModelSetting.get('ddns')}/{P.package_name}/playlist.m3u8"
+            arg["default_channel_urls"] = json.dumps(DEFAULT_CHANNEL_URLS, ensure_ascii=False, indent=2)
             return render_template(f"{P.package_name}_{self.name}_{sub}.html", arg=arg)
         except Exception:
             logger.exception("메뉴 처리 중 예외:")
@@ -200,22 +275,23 @@ class ModuleMain(PluginModuleBase):
                 rows = [
                     {
                         "source": "soop_kbo",
-                        "channel_id": ch_id,
+                        "channel_id": ch["id"],
                         "name": ch["name"],
                         "program": {"title": "LIVE"},
                     }
-                    for ch_id, ch in KBO_CHANNELS.items()
+                    for ch in _channel_list()
                 ]
                 from datetime import datetime
                 return jsonify({"list": rows, "updated_at": datetime.now().isoformat()})
             if sub == "play_url":
                 form = req.form.to_dict()
                 channel_id = form.get("channel_id", "")
-                if channel_id not in KBO_CHANNELS:
+                urls = _load_channel_urls()
+                if channel_id not in urls:
                     return jsonify({"data": None})
                 pb = _proxy_base()
                 url = f"{pb}/channel/{channel_id}.m3u8"
-                return jsonify({"data": {"url": url, "title": KBO_CHANNELS[channel_id]["name"]}})
+                return jsonify({"data": {"url": url, "title": CHANNEL_NAMES.get(channel_id, channel_id)}})
         except Exception:
             logger.exception("AJAX 처리 중 예외:")
 
@@ -225,27 +301,25 @@ class ModuleMain(PluginModuleBase):
 def soop_kbo_playlist():
     pb = _proxy_base()
     lines = ["#EXTM3U"]
-    for idx, (ch_id, ch) in enumerate(KBO_CHANNELS.items(), 1):
+    for idx, ch in enumerate(_channel_list(), 1):
         lines.append(
-            f'#EXTINF:-1 tvg-id="{ch_id}" tvg-name="{ch["name"]}" '
+            f'#EXTINF:-1 tvg-id="{ch["id"]}" tvg-name="{ch["name"]}" '
             f'group-title="KBO" tvg-chno="{idx}",{ch["name"]}'
         )
-        lines.append(f"{pb}/channel/{ch_id}.m3u8")
+        lines.append(f"{pb}/channel/{ch['id']}.m3u8")
     return Response("\n".join(lines) + "\n", content_type="audio/mpegurl")
 
 
 @blueprint.route("/channel/<channel_id>.m3u8")
 def soop_kbo_channel(channel_id: str):
     logger.info("[SOOP_KBO] 채널 요청: %s", channel_id)
-    if channel_id not in KBO_CHANNELS:
+    urls = _load_channel_urls()
+    if channel_id not in urls:
         abort(404)
     try:
-        stream = _get_stream(channel_id)
-        hls_url = _get_hls_url(stream)
+        hls_url = _get_hls_url(channel_id)
         logger.info("[SOOP_KBO] HLS URL: %.120s", hls_url)
 
-        purl = _proxy_url()
-        logger.info("[SOOP_KBO] m3u8 fetch 프록시: %s", purl or "없음(직접접속)")
         sess = _http_session()
         resp = sess.get(hls_url, timeout=15)
         logger.info("[SOOP_KBO] m3u8 응답: status=%s content-type=%s", resp.status_code, resp.headers.get("Content-Type"))

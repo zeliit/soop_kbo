@@ -6,10 +6,7 @@
 
   <form id='setting' name='setting'>
 
-    {{ macros.setting_checkbox('proxy_use', '미국 프록시 사용', value=arg['proxy_use'], desc=['SOOP KBO는 한국 IP에서 재생 불가 → 미국 프록시 필수', '형식: http://user:pass@host:port']) }}
-    <div id="proxy_use_div" class="collapse">
-      {{ macros.setting_input_text('proxy_url', 'Proxy URL', value=arg['proxy_url'], desc=['예) http://user:pass@1.2.3.4:8888']) }}
-    </div>
+    {{ macros.setting_input_text('proxy_url', '해외 Proxy URL (필수)', value=arg['proxy_url'], desc=['SOOP KBO는 한국 IP에서 재생 불가 → 해외 프록시 필수', '예) http://user:pass@1.2.3.4:8888']) }}
 
     {{ macros.m_hr() }}
 
@@ -23,12 +20,6 @@
 </div>
 
 <script type="text/javascript">
-$(document).ready(function(){
-  use_collapse("proxy_use");
-});
-
-$('#proxy_use').change(function() { use_collapse('proxy_use'); });
-
 $("body").on('click', '#localSettingSaveBtn', function(e){
   e.preventDefault();
   var formData = getFormdata('#setting');
