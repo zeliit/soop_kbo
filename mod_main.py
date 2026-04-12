@@ -106,6 +106,9 @@ CDN_TYPE_MAPPING = {
     "lg_cdn": "lg_cdn_pc_web",
 }
 CHANNEL_API_URL = "https://live.sooplive.com/afreeca/player_live_api.php"
+_http_lock = threading.Lock()
+_http_shared_session: requests.Session | None = None
+_http_shared_proxy: str | None = None
 
 
 # ─── 설정 헬퍼 ───────────────────────────────────────────────────────────────
@@ -120,16 +123,26 @@ def _required_proxy_url() -> str:
     return purl
 
 
-def _http_session() -> requests.Session:
+def _build_http_session(proxy_url: str) -> requests.Session:
     sess = requests.Session()
     sess.headers["User-Agent"] = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
     )
-    purl = _required_proxy_url()
-    sess.proxies.update({"http": purl, "https": purl})
+    sess.proxies.update({"http": proxy_url, "https": proxy_url})
     return sess
+
+
+def _http_session() -> requests.Session:
+    """프록시 세션 재사용으로 매 세그먼트 TLS 핸드셰이크 비용 감소."""
+    global _http_shared_session, _http_shared_proxy
+    purl = _required_proxy_url()
+    with _http_lock:
+        if _http_shared_session is None or _http_shared_proxy != purl:
+            _http_shared_session = _build_http_session(purl)
+            _http_shared_proxy = purl
+        return _http_shared_session
 
 
 # ─── SOOP API 직접 호출 ───────────────────────────────────────────────────────
@@ -318,7 +331,7 @@ def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
         return hls_url
 
     # 2) streamlink soop 플러그인 방식: type=aid + broad_stream_assign
-    # viewpreset 품질 우선순위: original 우선, 없으면 나머지
+    # viewpreset 품질 우선순위: 설정값 우선, 없으면 hd > original > sd
     qualities = []
     if isinstance(viewpreset, list):
         for item in viewpreset:
@@ -326,10 +339,14 @@ def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
                 q = item.get("name")
                 if q and q != "auto":
                     qualities.append(q)
-    if "original" in qualities:
-        qualities = ["original"] + [q for q in qualities if q != "original"]
-    if not qualities:
-        qualities = ["original", "hd", "sd"]
+    pref_raw = (ModelSetting.get("quality_preference") or "hd,original,sd").strip()
+    pref = [x.strip() for x in pref_raw.split(",") if x.strip()]
+    if qualities:
+        ordered = [q for q in pref if q in qualities]
+        remains = [q for q in qualities if q not in ordered]
+        qualities = ordered + remains
+    else:
+        qualities = pref if pref else ["hd", "original", "sd"]
 
     if bno and hls_url:
         for quality in qualities:
@@ -433,6 +450,7 @@ class ModuleMain(PluginModuleBase):
         self.db_default = {
             "proxy_use": "True",
             "proxy_url": "",
+            "quality_preference": "hd,original,sd",
             "channel_urls": json.dumps(DEFAULT_CHANNEL_URLS, ensure_ascii=False),
         }
 
