@@ -180,18 +180,38 @@ class ModuleMain(PluginModuleBase):
             logger.exception("메뉴 처리 중 예외:")
             return render_template("sample.html", title=f"{P.package_name} - {sub}")
 
-    def process_command(self, command, arg1, arg2, arg3, req):
+    def process_ajax(self, sub, req):
         from flask import jsonify
         try:
-            if command == "setting_save":
+            if sub == "setting_save":
                 saved, _ = P.ModelSetting.setting_save(req)
                 return jsonify(saved)
-            if command == "cache_clear":
+            if sub == "cache_clear":
                 with _cache_lock:
                     count = len(_cache)
                     _cache.clear()
                 logger.info("[SOOP_KBO] 캐시 초기화: %d개", count)
                 return jsonify({"count": count})
+            if sub == "channel_list":
+                rows = [
+                    {
+                        "source": "soop_kbo",
+                        "channel_id": ch_id,
+                        "name": ch["name"],
+                        "program": {"title": "LIVE"},
+                    }
+                    for ch_id, ch in KBO_CHANNELS.items()
+                ]
+                from datetime import datetime
+                return jsonify({"list": rows, "updated_at": datetime.now().isoformat()})
+            if sub == "play_url":
+                form = req.form.to_dict()
+                channel_id = form.get("channel_id", "")
+                if channel_id not in KBO_CHANNELS:
+                    return jsonify({"data": None})
+                pb = _proxy_base()
+                url = f"{pb}/channel/{channel_id}.m3u8"
+                return jsonify({"data": {"url": url, "title": KBO_CHANNELS[channel_id]["name"]}})
         except Exception:
             logger.exception("AJAX 처리 중 예외:")
 

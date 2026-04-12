@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div>
+  {{ macros.m_button_group([['list_reload_btn', '새로고침']])}}
+  <p class="mt-2 mb-1 text-sm small text-muted">마지막 업데이트: <span id="list_info">없음</span></p>
+  <div id="list_div" class="mb-3">
+    <table id="result_table" class="table table-sm table-striped table-hover">
+      <thead class="thead-dark">
+        <tr>
+          <th style="width:40px; text-align:center;">#</th>
+          <th style="text-align:left;">채널</th>
+          <th style="width:80px; text-align:center;">HLS</th>
+          <th style="width:80px; text-align:center;">Play</th>
+        </tr>
+      </thead>
+      <tbody id="channel-list">
+        <template id="channel-template">
+          <tr>
+            <td style="width:40px; text-align:center;" id="ch-idx"></td>
+            <td style="text-align:left;" id="ch-name"></td>
+            <td style="width:80px; text-align:center;" id="ch-hls"></td>
+            <td style="width:80px; text-align:center;" id="ch-play"></td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<form name="playform">
+  <input type="hidden" id="play_title" name="play_title">
+  <input type="hidden" id="play_source_src" name="play_source_src">
+  <input type="hidden" id="play_source_type" name="play_source_type">
+</form>
+
+<script type="text/javascript">
+$(document).ready(function(){
+  load_channel_list();
+});
+
+function load_channel_list() {
+  $('#channel-list').html('<tr><td colspan="4">로딩중...</td></tr>');
+  $.ajax({
+    url: `/${PACKAGE_NAME}/ajax/channel_list`,
+    type: "POST",
+    cache: false,
+    dataType: "json",
+    success: function(data) {
+      $('#list_info').text(new Date(data.updated_at).toLocaleString());
+      make_channel_list(data.list);
+    }
+  });
+}
+
+$("body").on('click', '#list_reload_btn', function(e){
+  e.preventDefault();
+  load_channel_list();
+});
+
+function make_channel_list(data) {
+  var scroller = document.querySelector('#channel-list');
+  scroller.querySelectorAll('tr').forEach(e => e.remove());
+  if (!data || data.length === 0) {
+    scroller.insertAdjacentHTML('beforeend', '<tr><td colspan="4">채널 없음</td></tr>');
+    return;
+  }
+  var tmpl = document.querySelector('#channel-template');
+  data.forEach(function(item, i) {
+    var clone = tmpl.content.cloneNode(true);
+    clone.querySelector('#ch-idx').textContent = i + 1;
+    clone.querySelector('#ch-name').textContent = item.name;
+    clone.querySelector('#ch-hls').innerHTML =
+      j_button_group(j_button('hls_btn', '<i class="fa fa-external-link px-1"></i>', {'id': item.channel_id}, 'secondary', false, true));
+    clone.querySelector('#ch-play').innerHTML =
+      j_button_group(j_button('play_btn', '<i class="fa fa-play px-1"></i>', {'id': item.channel_id, 'name': item.name}, 'secondary', false, true));
+    scroller.appendChild(clone);
+  });
+}
+
+$("body").on('click', '#hls_btn', function(e){
+  e.preventDefault();
+  var channel_id = $(this).data('id');
+  $.ajax({
+    url: `/${PACKAGE_NAME}/ajax/play_url`,
+    type: "POST",
+    data: {channel_id: channel_id},
+    dataType: "json",
+    success: function(ret) {
+      if (!ret.data) { $.notify('에러', {type:'danger'}); return; }
+      var url = ret.data.url;
+      var str = url + '<br><br>';
+      str += j_button_group(
+        j_button('globalCliboardBtn', '클립보드 복사', {'text': url}, 'success') +
+        j_button('globalOpenBtn', '새창에서 열기', {'url': url}, 'success')
+      );
+      showModal(str, ret.data.title + ' HLS', false);
+    }
+  });
+});
+
+$("body").on('click', '#play_btn', function(e){
+  e.preventDefault();
+  var channel_id = $(this).data('id');
+  var channel_name = $(this).data('name');
+  $.ajax({
+    url: `/${PACKAGE_NAME}/ajax/play_url`,
+    type: "POST",
+    data: {channel_id: channel_id},
+    dataType: "json",
+    success: function(ret) {
+      if (!ret.data) { $.notify('에러', {type:'danger'}); return; }
+      var form = document.playform;
+      var popupWidth = 980;
+      var leftPos = screen.width - popupWidth;
+      window.open('', ret.data.url, "location=no,resizable=no,status=no,toolbar=no,menubar=no,width=" + popupWidth + ",height=560,top=100,left=" + leftPos);
+      form.method = "post";
+      form.target = ret.data.url;
+      $('#play_title').val(channel_name);
+      $('#play_source_src').val(ret.data.url);
+      $('#play_source_type').val('application/x-mpegURL');
+      form.action = "/videojs";
+      form.submit();
+    }
+  });
+});
+</script>
+{% endblock %}

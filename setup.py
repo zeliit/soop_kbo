@@ -8,6 +8,7 @@ setting = {
         "name": "SOOP KBO",
         "list": [
             {"uri": "main/setting", "name": "설정"},
+            {"uri": "main/list", "name": "채널"},
             {"uri": "log", "name": "로그"},
         ],
     },
