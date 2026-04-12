@@ -24,7 +24,7 @@ from base64 import urlsafe_b64decode, urlsafe_b64encode
 from urllib.parse import urljoin, urlparse
 
 import requests
-from flask import Response, abort, render_template, request
+from flask import Response, abort, jsonify, render_template, request
 from plugin import F, PluginModuleBase  # type: ignore # pylint: disable=import-error
 
 from .setup import P
@@ -161,14 +161,41 @@ def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
     resp = sess.post(api_url, data=payload, headers=headers, timeout=15)
     resp.raise_for_status()
     data = resp.json()
-    logger.info("[SOOP_KBO] API 응답 result: %s", data.get("result"))
+    logger.info("[SOOP_KBO] API 응답 keys: %s", list(data.keys()) if isinstance(data, dict) else type(data))
 
-    # result=1: 방송 중, result=-6: 방송 없음 등
-    result_code = data.get("result", 0)
-    if result_code != 1:
-        raise RuntimeError(f"SOOP API result={result_code}: 방송 중이 아니거나 오류 ({bj_id})")
+    if not isinstance(data, dict):
+        raise RuntimeError(f"SOOP API 응답 형식 오류: {type(data)}")
 
     channel = data.get("CHANNEL", {})
+
+    # 응답 스키마가 변형되는 경우를 대비해 여러 키를 순차적으로 확인
+    # - data.result / data.RESULT
+    # - data.CHANNEL.result / data.CHANNEL.RESULT
+    result_code = (
+        data.get("result")
+        if data.get("result") is not None
+        else data.get("RESULT")
+    )
+    if result_code is None and isinstance(channel, dict):
+        result_code = (
+            channel.get("result")
+            if channel.get("result") is not None
+            else channel.get("RESULT")
+        )
+    if result_code is None:
+        result_code = 0
+
+    logger.info("[SOOP_KBO] API 응답 result=%s channel_keys=%s", result_code, list(channel.keys()) if isinstance(channel, dict) else [])
+
+    if result_code != 1:
+        message = data.get("message") or data.get("MSG")
+        if isinstance(channel, dict):
+            message = message or channel.get("RESULT_MSG") or channel.get("ERROR")
+        raise RuntimeError(
+            f"SOOP API result={result_code}: 방송 중이 아니거나 오류 ({bj_id}) "
+            f"message={message}"
+        )
+
     hls_url = channel.get("RMD") or channel.get("CDN") or ""
     if not hls_url:
         # CDN 목록에서 직접 구성
@@ -413,3 +440,25 @@ def soop_kbo_cache_clear():
         _cache.clear()
     logger.info("[SOOP_KBO] 캐시 초기화: %d개", count)
     return f"SOOP KBO 캐시 {count}개 삭제 완료\n", 200
+
+
+@blueprint.route("/proxy/check")
+def soop_kbo_proxy_check():
+    """현재 설정된 프록시의 외부 출구 IP를 확인."""
+    try:
+        proxy_url = _required_proxy_url()
+        sess = _http_session()
+        resp = sess.get("https://api.ipify.org?format=json", timeout=8)
+        resp.raise_for_status()
+        payload = resp.json() if resp.text else {}
+        return jsonify({
+            "ok": True,
+            "proxy_url": proxy_url,
+            "egress_ip": payload.get("ip"),
+        })
+    except Exception as e:
+        logger.exception("[SOOP_KBO] proxy check 실패")
+        return jsonify({
+            "ok": False,
+            "error": str(e),
+        }), 503
