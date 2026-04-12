@@ -105,6 +105,7 @@ CDN_TYPE_MAPPING = {
     "gs_cdn": "gs_cdn_pc_web",
     "lg_cdn": "lg_cdn_pc_web",
 }
+CHANNEL_API_URL = "https://live.sooplive.com/afreeca/player_live_api.php"
 
 
 # ─── 설정 헬퍼 ───────────────────────────────────────────────────────────────
@@ -139,6 +140,19 @@ def _parse_bj_id(page_url: str) -> str:
     return path.split("/")[0]
 
 
+def _extract_bno_from_page(sess: requests.Session, page_url: str) -> str | None:
+    """채널 페이지에서 방송번호(nBroadNo) 추출."""
+    try:
+        resp = sess.get(page_url, timeout=10)
+        resp.raise_for_status()
+        m = re.search(r"window\.nBroadNo\s*=\s*(\d+)\s*;", resp.text)
+        if m:
+            return m.group(1)
+    except Exception:
+        logger.exception("[SOOP_KBO] nBroadNo 추출 실패")
+    return None
+
+
 def _looks_like_m3u8_url(url: str) -> bool:
     """URL 문자열만으로 m3u8 가능성을 1차 판별."""
     u = url.lower()
@@ -167,7 +181,6 @@ def _normalize_return_type(cdn: str) -> str:
 
 def _get_aid(sess: requests.Session, bj_id: str, bno: str, quality: str) -> str | None:
     """type=aid API로 aid 토큰 획득."""
-    api_url = "https://live.sooplive.co.kr/afreeca/player_live_api.php"
     payload = {
         "bid": bj_id,
         "bno": bno,
@@ -179,7 +192,7 @@ def _get_aid(sess: requests.Session, bj_id: str, bno: str, quality: str) -> str 
         "from_api": "0",
         "pwd": "",
     }
-    resp = sess.post(api_url, data=payload, timeout=15)
+    resp = sess.post(CHANNEL_API_URL, data=payload, timeout=15)
     resp.raise_for_status()
     data = resp.json()
     if not isinstance(data, dict):
@@ -213,7 +226,7 @@ def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
     logger.info("[SOOP_KBO] BJ ID: %s / page_url: %s", bj_id, page_url)
 
     # 1) 라이브 정보 API
-    api_url = "https://live.sooplive.co.kr/afreeca/player_live_api.php"
+    api_url = CHANNEL_API_URL
     payload = {
         "bid": bj_id,
         "type": "live",
@@ -227,13 +240,20 @@ def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
     }
     headers = {
         "Referer": page_url,
-        "Origin": "https://play.sooplive.co.kr",
+        "Origin": "https://play.sooplive.com",
         "Content-Type": "application/x-www-form-urlencoded",
     }
-    sess.headers.update({"Referer": page_url, "Origin": "https://play.sooplive.co.kr"})
-    resp = sess.post(api_url, data=payload, headers=headers, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
+    sess.headers.update({"Referer": page_url, "Origin": "https://play.sooplive.com"})
+
+    def request_live(extra: dict | None = None) -> dict:
+        req_payload = dict(payload)
+        if extra:
+            req_payload.update(extra)
+        r = sess.post(api_url, data=req_payload, headers=headers, timeout=15)
+        r.raise_for_status()
+        return r.json()
+
+    data = request_live()
     logger.info("[SOOP_KBO] API 응답 keys: %s", list(data.keys()) if isinstance(data, dict) else type(data))
 
     if not isinstance(data, dict):
@@ -259,6 +279,18 @@ def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
         result_code = 0
 
     logger.info("[SOOP_KBO] API 응답 result=%s channel_keys=%s", result_code, list(channel.keys()) if isinstance(channel, dict) else [])
+
+    # 일부 채널은 bno 없으면 result=0이 내려와서 페이지의 nBroadNo로 재시도
+    if result_code != 1:
+        bno_hint = _extract_bno_from_page(sess, page_url)
+        if bno_hint:
+            logger.info("[SOOP_KBO] bno 재시도: %s", bno_hint)
+            data = request_live({"bno": bno_hint})
+            channel = data.get("CHANNEL", {}) if isinstance(data.get("CHANNEL"), dict) else {}
+            result_code = channel.get("RESULT")
+            if result_code is None:
+                result_code = data.get("result") or data.get("RESULT") or 0
+            logger.info("[SOOP_KBO] bno 재시도 result=%s", result_code)
 
     if result_code != 1:
         message = data.get("message") or data.get("MSG")
