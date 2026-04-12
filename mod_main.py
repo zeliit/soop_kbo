@@ -135,6 +135,24 @@ def _parse_bj_id(page_url: str) -> str:
     return path.split("/")[0]
 
 
+def _looks_like_m3u8_url(url: str) -> bool:
+    """URL 문자열만으로 m3u8 가능성을 1차 판별."""
+    u = url.lower()
+    return ".m3u8" in u or "/hls/" in u or "/live/" in u
+
+
+def _probe_m3u8_url(sess: requests.Session, url: str) -> bool:
+    """실제 요청으로 m3u8 여부를 확인."""
+    try:
+        resp = sess.get(url, timeout=10)
+        if resp.status_code != 200:
+            return False
+        body_head = (resp.text or "")[:256]
+        return "#EXTM3U" in body_head or "#EXT-X-" in body_head
+    except Exception:
+        return False
+
+
 def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
     """SOOP 방송국 API에서 HLS URL 획득."""
     bj_id = _parse_bj_id(page_url)
@@ -203,11 +221,43 @@ def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
         logger.info("[SOOP_KBO] CDN_LIST: %s", cdn_list)
         raise RuntimeError(f"HLS URL을 찾을 수 없음. CHANNEL keys: {list(channel.keys())}")
 
-    # RMD 값이 전체 m3u8 URL이면 그대로 사용, 아니면 조합
-    if not hls_url.startswith("http"):
-        bno = channel.get("BNO", "")
-        auth_key = channel.get("AUTH_KEY", "")
-        hls_url = f"https://{hls_url}/live/{bj_id}_{bno}/original/hls/playlist.m3u8?aid={auth_key}"
+    bno = str(channel.get("BNO", "")).strip()
+    # SOOP 응답마다 토큰 키가 달라서 가능한 키를 순차 확인
+    aid = (
+        str(channel.get("AUTH_KEY", "")).strip()
+        or str(channel.get("AID", "")).strip()
+        or str(channel.get("FTK", "")).strip()
+    )
+
+    # 1) 이미 완전한 m3u8 URL이면 그대로 사용
+    if hls_url.startswith("http") and _looks_like_m3u8_url(hls_url):
+        logger.info("[SOOP_KBO] 직접 m3u8 URL 사용")
+        return hls_url
+
+    # 2) 도메인/호스트만 내려오는 케이스 보강
+    host = hls_url
+    if not host.startswith("http"):
+        host = f"https://{host}"
+    host = host.rstrip("/")
+
+    candidates = []
+    if bno:
+        base_path = f"/live/{bj_id}_{bno}/original/hls/playlist.m3u8"
+        if aid:
+            candidates.append(f"{host}{base_path}?aid={aid}")
+        candidates.append(f"{host}{base_path}")
+        candidates.append(f"{host}/live/{bj_id}_{bno}/playlist.m3u8")
+        candidates.append(f"{host}/live/{bj_id}_{bno}/master.m3u8")
+
+    logger.info("[SOOP_KBO] HLS 후보 URL 개수: %d", len(candidates))
+    for cand in candidates:
+        if _probe_m3u8_url(sess, cand):
+            logger.info("[SOOP_KBO] HLS 후보 성공: %.120s", cand)
+            return cand
+
+    # 3) 마지막 fallback: 원본 값 반환 (아래 단계에서 상세 HTTP 오류 확인 가능)
+    logger.warning("[SOOP_KBO] HLS 후보 탐색 실패, 원본 URL fallback: %.120s", host)
+    hls_url = host
 
     logger.info("[SOOP_KBO] HLS URL: %.120s", hls_url)
     return hls_url
