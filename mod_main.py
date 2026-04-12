@@ -10,9 +10,9 @@ SOOP KBO 스트림을 HLS 프록시로 제공합니다.
   /soop_kbo/seg                    - 세그먼트 프록시
   /soop_kbo/cache/clear            - 스트림 캐시 초기화
 
-[ 설정 (alive DB 설정 연동) ]
-  streamlink_use_proxy  : true / false
-  streamlink_proxy_url  : http://user:pass@host:port
+[ 설정 ]
+  proxy_use  : true / false
+  proxy_url  : http://user:pass@host:port
 """
 import re
 import threading
@@ -21,7 +21,7 @@ from base64 import urlsafe_b64decode, urlsafe_b64encode
 from urllib.parse import urljoin, urlparse
 
 import requests
-from flask import Response, abort, request
+from flask import Response, abort, render_template, request
 from plugin import F, PluginModuleBase  # type: ignore # pylint: disable=import-error
 
 from .setup import P
@@ -161,35 +161,32 @@ def _rewrite_m3u8(m3u8_text: str, m3u8_url: str, channel_id: str) -> str:
     return "".join(result)
 
 
-# ─── Logic 클래스 (플러그인 프레임워크 필수) ─────────────────────────────────
-class Logic(PluginModuleBase):
-    db_default = {
-        "proxy_use": "False",
-        "proxy_url": "",
-    }
-
-    def __init__(self, PM):
-        super().__init__(PM, None)
-        self.name = "setting"
+# ─── ModuleMain 클래스 (플러그인 프레임워크 필수) ────────────────────────────
+class ModuleMain(PluginModuleBase):
+    def __init__(self, P):
+        super(ModuleMain, self).__init__(P, name="main", first_menu="setting")
+        self.db_default = {
+            "proxy_use": "False",
+            "proxy_url": "",
+        }
 
     def process_menu(self, sub, req):
-        from flask import render_template
         try:
-            arg = ModelSetting.to_dict()
-            arg["package_name"] = package_name
-            arg["playlist_url"] = f"{SystemModelSetting.get('ddns')}/{package_name}/playlist.m3u8"
-            return render_template(f"{package_name}_{sub}.html", sub=sub, arg=arg)
+            arg = P.ModelSetting.to_dict()
+            arg["package_name"] = P.package_name
+            arg["playlist_url"] = f"{SystemModelSetting.get('ddns')}/{P.package_name}/playlist.m3u8"
+            return render_template(f"{P.package_name}_{self.name}_{sub}.html", arg=arg)
         except Exception:
             logger.exception("메뉴 처리 중 예외:")
-            return render_template("sample.html", title=f"{package_name} - {sub}")
+            return render_template("sample.html", title=f"{P.package_name} - {sub}")
 
-    def process_ajax(self, sub, req):
+    def process_command(self, command, arg1, arg2, arg3, req):
         from flask import jsonify
         try:
-            if sub == "setting_save":
-                saved, _ = ModelSetting.setting_save(req)
+            if command == "setting_save":
+                saved, _ = P.ModelSetting.setting_save(req)
                 return jsonify(saved)
-            if sub == "cache_clear":
+            if command == "cache_clear":
                 with _cache_lock:
                     count = len(_cache)
                     _cache.clear()
