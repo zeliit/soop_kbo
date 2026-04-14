@@ -692,8 +692,13 @@ class ModuleMain(PluginModuleBase):
             fail_count = sum(1 for row in rows if row.get("program", {}).get("title") == "조회 실패")
             result_msg = f"{summary} fail={fail_count}"
             ModelSetting.set("schedule_last_result", result_msg)
-            ModelSetting.set("channel_list_cache", json.dumps(rows, ensure_ascii=False))
+            cache_json = json.dumps(rows, ensure_ascii=False)
+            logger.info("[SOOP_KBO][SCHED] DB저장 시도 rows=%d json_len=%d", len(rows), len(cache_json))
+            ModelSetting.set("channel_list_cache", cache_json)
             ModelSetting.set("channel_list_updated_at", datetime.now().isoformat())
+            verify = ModelSetting.get("channel_list_cache") or ""
+            logger.info("[SOOP_KBO][SCHED] DB저장 검증 saved_len=%d match=%s preview=%s",
+                        len(verify), len(verify) == len(cache_json), verify[:80])
             logger.info("[SOOP_KBO][SCHED] %s", result_msg)
         except Exception:
             logger.exception("[SOOP_KBO][SCHED] 실행 오류")
@@ -717,9 +722,15 @@ class ModuleMain(PluginModuleBase):
             if sub == "channel_list":
                 raw = ModelSetting.get("channel_list_cache") or ""
                 updated_at = ModelSetting.get("channel_list_updated_at") or ""
+                logger.info("[SOOP_KBO][AJAX] channel_list raw_len=%d updated_at=%s preview=%s",
+                            len(raw), updated_at, raw[:80])
                 try:
                     rows = json.loads(raw) if raw else _fallback_rows_waiting()
+                    logger.info("[SOOP_KBO][AJAX] channel_list parsed rows=%d titles=%s",
+                                len(rows),
+                                [r.get("program", {}).get("title", "") for r in rows])
                 except Exception:
+                    logger.exception("[SOOP_KBO][AJAX] channel_list JSON 파싱 실패")
                     rows = _fallback_rows_waiting()
                 return jsonify({"list": rows, "updated_at": updated_at})
             if sub == "play_url":
