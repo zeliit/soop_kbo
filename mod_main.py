@@ -35,6 +35,7 @@ package_name = P.package_name
 ModelSetting = P.ModelSetting
 blueprint = P.blueprint
 SystemModelSetting = F.SystemModelSetting
+scheduler = F.scheduler
 PLUGIN_VERSION = "unknown"
 
 
@@ -556,12 +557,16 @@ def _rewrite_m3u8(m3u8_text: str, m3u8_url: str, channel_id: str) -> str:
 # ─── ModuleMain 클래스 (플러그인 프레임워크 필수) ────────────────────────────
 class ModuleMain(PluginModuleBase):
     def __init__(self, P):
-        super(ModuleMain, self).__init__(P, name="main", first_menu="setting")
+        super(ModuleMain, self).__init__(P, name="main", first_menu="setting", scheduler_desc="SOOP KBO 채널목록 갱신")
         self.db_default = {
             "proxy_use": "True",
             "proxy_url": "",
             "quality_preference": "original,hd,sd",
             "channel_urls": json.dumps(DEFAULT_CHANNEL_URLS, ensure_ascii=False),
+            "main_auto_start": "False",
+            "main_interval": "*/10 * * * *",
+            "schedule_last_run": "",
+            "schedule_last_result": "",
         }
 
     def process_menu(self, sub, _req):
@@ -571,10 +576,49 @@ class ModuleMain(PluginModuleBase):
             arg["plugin_version"] = PLUGIN_VERSION
             arg["playlist_url"] = f"{SystemModelSetting.get('ddns')}/{P.package_name}/playlist.m3u8"
             arg["default_channel_urls"] = json.dumps(DEFAULT_CHANNEL_URLS, ensure_ascii=False, indent=2)
+            if sub == "setting":
+                arg["is_include"] = scheduler.is_include(self.get_scheduler_name())
+                arg["is_running"] = scheduler.is_running(self.get_scheduler_name())
             return render_template(f"{P.package_name}_{self.name}_{sub}.html", arg=arg)
         except Exception:
             logger.exception("메뉴 처리 중 예외:")
             return render_template("sample.html", title=f"{P.package_name} - {sub}")
+
+    def scheduler_function(self):
+        """스케줄러 실행: 채널 제목 캐시를 미리 갱신."""
+        started = time.time()
+        ok_count = 0
+        fail_count = 0
+        try:
+            channels = _channel_list()
+            proxy_url = _get_proxy_url()
+            with ThreadPoolExecutor(max_workers=min(5, len(channels) or 1)) as exe:
+                fut_map = {
+                    exe.submit(
+                        _get_channel_live_meta_cached,
+                        ch["id"],
+                        ch["url"],
+                        _build_http_session(proxy_url),
+                    ): ch["id"]
+                    for ch in channels
+                }
+                for fut in as_completed(fut_map):
+                    ch_id = fut_map[fut]
+                    try:
+                        fut.result()
+                        ok_count += 1
+                    except Exception:
+                        fail_count += 1
+                        logger.exception("[SOOP_KBO][SCHED] 채널 갱신 실패: %s", ch_id)
+            result_msg = f"ok={ok_count} fail={fail_count} elapsed_ms={int((time.time() - started) * 1000)}"
+            ModelSetting.set("schedule_last_result", result_msg)
+            logger.info("[SOOP_KBO][SCHED] %s", result_msg)
+        except Exception:
+            logger.exception("[SOOP_KBO][SCHED] 실행 오류")
+            ModelSetting.set("schedule_last_result", "error")
+        finally:
+            from datetime import datetime
+            ModelSetting.set("schedule_last_run", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
     def process_ajax(self, sub, req):
         from flask import jsonify
@@ -593,10 +637,12 @@ class ModuleMain(PluginModuleBase):
                 started_at = time.time()
                 channels = _channel_list()
                 logger.info("[SOOP_KBO] channel_list start channels=%d", len(channels))
+                proxy_url = _get_proxy_url()
 
                 def build_row(ch: dict) -> dict:
                     t0 = time.time()
-                    sess = _http_session()
+                    # requests.Session은 thread-safe 보장이 없어 스레드별 세션 사용
+                    sess = _build_http_session(proxy_url)
                     meta = _get_channel_live_meta_cached(ch["id"], ch["url"], sess)
                     title = meta.get("title") or ("방송 중" if meta.get("onair") else "오프에어")
                     elapsed = round((time.time() - t0) * 1000)
