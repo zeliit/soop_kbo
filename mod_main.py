@@ -753,6 +753,22 @@ class ModuleMain(PluginModuleBase):
 
 
 # ─── 라우트 ───────────────────────────────────────────────────────────────────
+@blueprint.route("/ajax/channel_list", methods=["POST"])
+def soop_kbo_ajax_channel_list():
+    raw = ModelSetting.get("channel_list_cache") or ""
+    updated_at = ModelSetting.get("channel_list_updated_at") or ""
+    logger.info("[SOOP_KBO][AJAX-DIRECT] channel_list raw_len=%d updated_at=%s preview=%s",
+                len(raw), updated_at, raw[:80])
+    try:
+        rows = json.loads(raw) if raw else _fallback_rows_waiting()
+        logger.info("[SOOP_KBO][AJAX-DIRECT] parsed rows=%d titles=%s",
+                    len(rows), [r.get("program", {}).get("title", "") for r in rows])
+    except Exception:
+        logger.exception("[SOOP_KBO][AJAX-DIRECT] JSON 파싱 실패")
+        rows = _fallback_rows_waiting()
+    return jsonify({"list": rows, "updated_at": updated_at})
+
+
 @blueprint.route("/playlist.m3u8")
 def soop_kbo_playlist():
     pb = _proxy_base()
