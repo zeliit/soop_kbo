@@ -690,10 +690,18 @@ class ModuleMain(PluginModuleBase):
                 logger.info("[SOOP_KBO] 캐시 초기화: %d개", count)
                 return jsonify({"count": count})
             if sub == "channel_list":
-                # 목록 페이지는 가볍게 캐시된 제목만 보여준다.
                 from datetime import datetime
-                rows = _rows_from_title_cache()
-                return jsonify({"list": rows, "updated_at": datetime.now().isoformat()})
+                try:
+                    rows, summary = _refresh_channel_titles("WEB")
+                    return jsonify({"list": rows, "updated_at": datetime.now().isoformat(), "summary": summary})
+                except Exception as e:
+                    logger.error("[SOOP_KBO][WEB] channel_list 실패: %s", e)
+                    logger.error(traceback.format_exc())
+                    return jsonify({
+                        "list": [],
+                        "updated_at": datetime.now().isoformat(),
+                        "error": str(e),
+                    }), 200
             if sub == "play_url":
                 form = req.form.to_dict()
                 channel_id = form.get("channel_id", "")
