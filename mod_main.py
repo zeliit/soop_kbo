@@ -665,6 +665,8 @@ class ModuleMain(PluginModuleBase):
             "main_interval": "*/10 * * * *",
             "schedule_last_run": "",
             "schedule_last_result": "",
+            "channel_list_cache": "",
+            "channel_list_updated_at": "",
         }
 
     def process_menu(self, sub, _req):
@@ -683,18 +685,20 @@ class ModuleMain(PluginModuleBase):
             return render_template("sample.html", title=f"{P.package_name} - {sub}")
 
     def scheduler_function(self):
-        """스케줄러 실행: 채널 제목 캐시를 미리 갱신."""
+        """스케줄러 실행: 채널 제목을 조회하고 DB에 저장."""
+        from datetime import datetime
         try:
             rows, summary = _refresh_channel_titles("CELERY")
             fail_count = sum(1 for row in rows if row.get("program", {}).get("title") == "조회 실패")
             result_msg = f"{summary} fail={fail_count}"
             ModelSetting.set("schedule_last_result", result_msg)
+            ModelSetting.set("channel_list_cache", json.dumps(rows, ensure_ascii=False))
+            ModelSetting.set("channel_list_updated_at", datetime.now().isoformat())
             logger.info("[SOOP_KBO][SCHED] %s", result_msg)
         except Exception:
             logger.exception("[SOOP_KBO][SCHED] 실행 오류")
             ModelSetting.set("schedule_last_result", "error")
         finally:
-            from datetime import datetime
             ModelSetting.set("schedule_last_run", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
     def process_ajax(self, sub, req):
@@ -711,9 +715,13 @@ class ModuleMain(PluginModuleBase):
                 logger.info("[SOOP_KBO] 캐시 초기화: %d개", count)
                 return jsonify({"count": count})
             if sub == "channel_list":
-                from datetime import datetime
-                rows = _rows_from_title_cache()
-                return jsonify({"list": rows, "updated_at": datetime.now().isoformat()})
+                raw = ModelSetting.get("channel_list_cache") or ""
+                updated_at = ModelSetting.get("channel_list_updated_at") or ""
+                try:
+                    rows = json.loads(raw) if raw else _fallback_rows_waiting()
+                except Exception:
+                    rows = _fallback_rows_waiting()
+                return jsonify({"list": rows, "updated_at": updated_at})
             if sub == "play_url":
                 form = req.form.to_dict()
                 channel_id = form.get("channel_id", "")
