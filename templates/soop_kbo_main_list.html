@@ -50,6 +50,9 @@ function load_channel_list() {
     dataType: "json",
     success: function(data) {
       $('#list_info').text(new Date(data.updated_at).toLocaleString());
+      if (data.error) {
+        $.notify('채널 목록 조회 경고: ' + data.error, {type:'warning'});
+      }
       make_channel_list(data.list);
     },
     error: function(xhr) {

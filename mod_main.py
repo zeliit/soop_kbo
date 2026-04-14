@@ -20,6 +20,7 @@ import os
 import re
 import threading
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from urllib.parse import urljoin, urlparse
@@ -507,6 +508,60 @@ def _get_channel_live_meta_cached(channel_id: str, page_url: str, sess: requests
     return item
 
 
+def _refresh_channel_titles(log_prefix: str = "WEB") -> tuple[list[dict], str]:
+    """채널 제목을 병렬 갱신하고 rows와 요약 문자열을 반환."""
+    started_at = time.time()
+    channels = _channel_list()
+    proxy_url = _get_proxy_url()
+    rows = []
+    logger.info("[SOOP_KBO][%s] channel_list start channels=%d", log_prefix, len(channels))
+
+    def build_row(ch: dict) -> dict:
+        t0 = time.time()
+        # requests.Session은 thread-safe 보장이 없어 스레드별 세션 사용
+        sess = _build_http_session(proxy_url)
+        meta = _get_channel_live_meta_cached(ch["id"], ch["url"], sess)
+        title = meta.get("title") or ("방송 중" if meta.get("onair") else "오프에어")
+        elapsed = round((time.time() - t0) * 1000)
+        logger.info(
+            "[SOOP_KBO][%s] channel_list item id=%s onair=%s title=%s elapsed_ms=%s",
+            log_prefix,
+            ch["id"],
+            meta.get("onair"),
+            (title[:80] if isinstance(title, str) else title),
+            elapsed,
+        )
+        return {
+            "source": "soop_kbo",
+            "channel_id": ch["id"],
+            "name": ch["name"],
+            "program": {"title": title},
+        }
+
+    with ThreadPoolExecutor(max_workers=min(5, len(channels) or 1)) as exe:
+        fut_map = {exe.submit(build_row, ch): ch for ch in channels}
+        for fut in as_completed(fut_map):
+            ch = fut_map[fut]
+            try:
+                rows.append(fut.result())
+            except Exception:
+                logger.exception("[SOOP_KBO][%s] channel_list item 실패: %s", log_prefix, ch["id"])
+                rows.append(
+                    {
+                        "source": "soop_kbo",
+                        "channel_id": ch["id"],
+                        "name": ch["name"],
+                        "program": {"title": "조회 실패"},
+                    }
+                )
+
+    order = {ch["id"]: idx for idx, ch in enumerate(channels)}
+    rows.sort(key=lambda x: order.get(x.get("channel_id"), 999))
+    summary = f"elapsed_ms={int((time.time() - started_at) * 1000)} rows={len(rows)}"
+    logger.info("[SOOP_KBO][%s] channel_list done %s", log_prefix, summary)
+    return rows, summary
+
+
 # ─── M3U8 처리 ───────────────────────────────────────────────────────────────
 def _b64enc(s: str) -> str:
     return urlsafe_b64encode(s.encode()).decode()
@@ -586,31 +641,10 @@ class ModuleMain(PluginModuleBase):
 
     def scheduler_function(self):
         """스케줄러 실행: 채널 제목 캐시를 미리 갱신."""
-        started = time.time()
-        ok_count = 0
-        fail_count = 0
         try:
-            channels = _channel_list()
-            proxy_url = _get_proxy_url()
-            with ThreadPoolExecutor(max_workers=min(5, len(channels) or 1)) as exe:
-                fut_map = {
-                    exe.submit(
-                        _get_channel_live_meta_cached,
-                        ch["id"],
-                        ch["url"],
-                        _build_http_session(proxy_url),
-                    ): ch["id"]
-                    for ch in channels
-                }
-                for fut in as_completed(fut_map):
-                    ch_id = fut_map[fut]
-                    try:
-                        fut.result()
-                        ok_count += 1
-                    except Exception:
-                        fail_count += 1
-                        logger.exception("[SOOP_KBO][SCHED] 채널 갱신 실패: %s", ch_id)
-            result_msg = f"ok={ok_count} fail={fail_count} elapsed_ms={int((time.time() - started) * 1000)}"
+            rows, summary = _refresh_channel_titles("CELERY")
+            fail_count = sum(1 for row in rows if row.get("program", {}).get("title") == "조회 실패")
+            result_msg = f"{summary} fail={fail_count}"
             ModelSetting.set("schedule_last_result", result_msg)
             logger.info("[SOOP_KBO][SCHED] %s", result_msg)
         except Exception:
@@ -634,57 +668,18 @@ class ModuleMain(PluginModuleBase):
                 logger.info("[SOOP_KBO] 캐시 초기화: %d개", count)
                 return jsonify({"count": count})
             if sub == "channel_list":
-                started_at = time.time()
-                channels = _channel_list()
-                logger.info("[SOOP_KBO] channel_list start channels=%d", len(channels))
-                proxy_url = _get_proxy_url()
-
-                def build_row(ch: dict) -> dict:
-                    t0 = time.time()
-                    # requests.Session은 thread-safe 보장이 없어 스레드별 세션 사용
-                    sess = _build_http_session(proxy_url)
-                    meta = _get_channel_live_meta_cached(ch["id"], ch["url"], sess)
-                    title = meta.get("title") or ("방송 중" if meta.get("onair") else "오프에어")
-                    elapsed = round((time.time() - t0) * 1000)
-                    logger.info(
-                        "[SOOP_KBO] channel_list item id=%s onair=%s title=%s elapsed_ms=%s",
-                        ch["id"],
-                        meta.get("onair"),
-                        (title[:80] if isinstance(title, str) else title),
-                        elapsed,
-                    )
-                    return {
-                        "source": "soop_kbo",
-                        "channel_id": ch["id"],
-                        "name": ch["name"],
-                        "program": {"title": title},
-                    }
-
-                rows = []
-                with ThreadPoolExecutor(max_workers=min(5, len(channels) or 1)) as exe:
-                    fut_map = {exe.submit(build_row, ch): ch for ch in channels}
-                    for fut in as_completed(fut_map):
-                        ch = fut_map[fut]
-                        try:
-                            rows.append(fut.result())
-                        except Exception:
-                            logger.exception("[SOOP_KBO] channel_list item 실패: %s", ch["id"])
-                            rows.append(
-                                {
-                                    "source": "soop_kbo",
-                                    "channel_id": ch["id"],
-                                    "name": ch["name"],
-                                    "program": {"title": "조회 실패"},
-                                }
-                            )
-
-                # 채널 순서 고정
-                order = {ch["id"]: idx for idx, ch in enumerate(channels)}
-                rows.sort(key=lambda x: order.get(x["channel_id"], 999))
-                logger.info("[SOOP_KBO] channel_list done elapsed_ms=%d", int((time.time() - started_at) * 1000))
-
                 from datetime import datetime
-                return jsonify({"list": rows, "updated_at": datetime.now().isoformat()})
+                try:
+                    rows, summary = _refresh_channel_titles("WEB")
+                    return jsonify({"list": rows, "updated_at": datetime.now().isoformat(), "summary": summary})
+                except Exception as e:
+                    logger.error("[SOOP_KBO][WEB] channel_list 실패: %s", e)
+                    logger.error(traceback.format_exc())
+                    return jsonify({
+                        "list": [],
+                        "updated_at": datetime.now().isoformat(),
+                        "error": str(e),
+                    }), 200
             if sub == "play_url":
                 form = req.form.to_dict()
                 channel_id = form.get("channel_id", "")
@@ -696,7 +691,7 @@ class ModuleMain(PluginModuleBase):
                 return jsonify({"data": {"url": url, "title": CHANNEL_NAMES.get(channel_id, channel_id)}})
         except Exception:
             logger.exception("AJAX 처리 중 예외:")
-            return jsonify({"list": [], "updated_at": "", "error": "channel_list_failed"}), 500
+            return jsonify({"list": [], "updated_at": "", "error": "ajax_failed"}), 200
 
 
 # ─── 라우트 ───────────────────────────────────────────────────────────────────
