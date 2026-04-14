@@ -10,6 +10,7 @@
         <tr>
           <th style="width:40px; text-align:center;">#</th>
           <th style="text-align:left;">채널</th>
+          <th style="text-align:left;">경기</th>
           <th style="width:80px; text-align:center;">HLS</th>
           <th style="width:80px; text-align:center;">Play</th>
         </tr>
@@ -19,6 +20,7 @@
           <tr>
             <td style="width:40px; text-align:center;" id="ch-idx"></td>
             <td style="text-align:left;" id="ch-name"></td>
+            <td style="text-align:left;" id="ch-program"></td>
             <td style="width:80px; text-align:center;" id="ch-hls"></td>
             <td style="width:80px; text-align:center;" id="ch-play"></td>
           </tr>
@@ -40,7 +42,7 @@ $(document).ready(function(){
 });
 
 function load_channel_list() {
-  $('#channel-list').html('<tr><td colspan="4">로딩중...</td></tr>');
+  $('#channel-list').html('<tr><td colspan="5">로딩중...</td></tr>');
   $.ajax({
     url: `/${PACKAGE_NAME}/ajax/channel_list`,
     type: "POST",
@@ -62,7 +64,7 @@ function make_channel_list(data) {
   var scroller = document.querySelector('#channel-list');
   scroller.querySelectorAll('tr').forEach(e => e.remove());
   if (!data || data.length === 0) {
-    scroller.insertAdjacentHTML('beforeend', '<tr><td colspan="4">채널 없음</td></tr>');
+    scroller.insertAdjacentHTML('beforeend', '<tr><td colspan="5">채널 없음</td></tr>');
     return;
   }
   var tmpl = document.querySelector('#channel-template');
@@ -70,6 +72,7 @@ function make_channel_list(data) {
     var clone = tmpl.content.cloneNode(true);
     clone.querySelector('#ch-idx').textContent = i + 1;
     clone.querySelector('#ch-name').textContent = item.name;
+    clone.querySelector('#ch-program').textContent = (item.program && item.program.title) ? item.program.title : '-';
     clone.querySelector('#ch-hls').innerHTML =
       j_button_group(j_button('hls_btn', '<i class="fa fa-external-link px-1"></i>', {'id': item.channel_id}, 'secondary', false, true));
     clone.querySelector('#ch-play').innerHTML =

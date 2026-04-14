@@ -101,6 +101,7 @@ def _channel_list() -> list[dict]:
 _cache: dict = {}
 _cache_lock = threading.Lock()
 CACHE_TTL = 1800  # 30분
+TITLE_CACHE_TTL = 60  # 1분
 QUALITY_LOG_INTERVAL = 30
 CDN_TYPE_MAPPING = {
     "gs_cdn": "gs_cdn_pc_web",
@@ -113,18 +114,14 @@ _http_shared_proxy: str | None = None
 _quality_state_lock = threading.Lock()
 _channel_quality: dict[str, str] = {}
 _quality_log_last_ts: dict[str, float] = {}
+_title_cache_lock = threading.Lock()
+_title_cache: dict[str, tuple[dict, float]] = {}
 
 
 # ─── 설정 헬퍼 ───────────────────────────────────────────────────────────────
-def _required_proxy_url() -> str:
-    """SOOP KBO는 해외 IP가 필요하므로 프록시를 필수로 강제."""
-    purl = (ModelSetting.get("proxy_url") or "").strip()
-    if not purl:
-        raise RuntimeError(
-            "[SOOP_KBO] proxy_url 미설정. "
-            "SOOP KBO는 해외 프록시가 필수입니다."
-        )
-    return purl
+def _get_proxy_url() -> str:
+    """설정된 프록시 URL 반환. (미설정 시 빈 문자열로 직접 접속 허용)"""
+    return (ModelSetting.get("proxy_url") or "").strip()
 
 
 def _build_http_session(proxy_url: str) -> requests.Session:
@@ -134,14 +131,15 @@ def _build_http_session(proxy_url: str) -> requests.Session:
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
     )
-    sess.proxies.update({"http": proxy_url, "https": proxy_url})
+    if proxy_url:
+        sess.proxies.update({"http": proxy_url, "https": proxy_url})
     return sess
 
 
 def _http_session() -> requests.Session:
     """프록시 세션 재사용으로 매 세그먼트 TLS 핸드셰이크 비용 감소."""
     global _http_shared_session, _http_shared_proxy
-    purl = _required_proxy_url()
+    purl = _get_proxy_url()
     with _http_lock:
         if _http_shared_session is None or _http_shared_proxy != purl:
             _http_shared_session = _build_http_session(purl)
@@ -344,14 +342,14 @@ def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
                 q = item.get("name")
                 if q and q != "auto":
                     qualities.append(q)
-    pref_raw = (ModelSetting.get("quality_preference") or "hd,original,sd").strip()
+    pref_raw = (ModelSetting.get("quality_preference") or "original,hd,sd").strip()
     pref = [x.strip() for x in pref_raw.split(",") if x.strip()]
     if qualities:
         ordered = [q for q in pref if q in qualities]
         remains = [q for q in qualities if q not in ordered]
         qualities = ordered + remains
     else:
-        qualities = pref if pref else ["hd", "original", "sd"]
+        qualities = pref if pref else ["original", "hd", "sd"]
 
     if bno and hls_url:
         for quality in qualities:
@@ -400,6 +398,84 @@ def _get_hls_url(channel_id: str) -> str:
     with _cache_lock:
         _cache[channel_id] = (hls_url, time.time())
     return hls_url
+
+
+def _extract_result_code(data: dict, channel: dict) -> int:
+    result_code = data.get("result", data.get("RESULT"))
+    if result_code is None:
+        result_code = channel.get("result", channel.get("RESULT"))
+    if result_code is None:
+        result_code = 0
+    try:
+        return int(result_code)
+    except Exception:
+        return 0
+
+
+def _fetch_channel_live_meta(page_url: str, sess: requests.Session) -> dict:
+    """채널 페이지 URL에서 라이브 메타(제목/온에어)를 조회."""
+    bj_id = _parse_bj_id(page_url)
+    payload = {
+        "bid": bj_id,
+        "type": "live",
+        "quality": "original",
+        "player_type": "html5",
+        "mode": "landing",
+        "from_api": "0",
+        "pwd": "",
+        "stream_type": "common",
+        "is_revive": "false",
+    }
+    headers = {
+        "Referer": page_url,
+        "Origin": "https://play.sooplive.com",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+    def request_live(extra: dict | None = None) -> dict:
+        req_payload = dict(payload)
+        if extra:
+            req_payload.update(extra)
+        resp = sess.post(CHANNEL_API_URL, data=req_payload, headers=headers, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    data = request_live()
+    channel = data.get("CHANNEL", {}) if isinstance(data.get("CHANNEL"), dict) else {}
+    result_code = _extract_result_code(data, channel)
+
+    # 일부 채널은 bno 포함 재시도 필요
+    if result_code != 1:
+        if bno_hint := _extract_bno_from_page(sess, page_url):
+            data = request_live({"bno": bno_hint})
+            channel = data.get("CHANNEL", {}) if isinstance(data.get("CHANNEL"), dict) else {}
+            result_code = _extract_result_code(data, channel)
+
+    title = ""
+    if isinstance(channel, dict):
+        title = (channel.get("TITLE") or "").strip()
+    return {
+        "onair": result_code == 1,
+        "title": title,
+        "bj_id": bj_id,
+    }
+
+
+def _get_channel_live_meta_cached(channel_id: str, page_url: str, sess: requests.Session) -> dict:
+    now = time.time()
+    with _title_cache_lock:
+        if channel_id in _title_cache:
+            item, ts = _title_cache[channel_id]
+            if now - ts < TITLE_CACHE_TTL:
+                return item
+    try:
+        item = _fetch_channel_live_meta(page_url, sess)
+    except Exception:
+        logger.exception("[SOOP_KBO] 경기정보 조회 실패: %s", channel_id)
+        item = {"onair": False, "title": "", "bj_id": _parse_bj_id(page_url)}
+    with _title_cache_lock:
+        _title_cache[channel_id] = (item, now)
+    return item
 
 
 # ─── M3U8 처리 ───────────────────────────────────────────────────────────────
@@ -456,7 +532,7 @@ class ModuleMain(PluginModuleBase):
         self.db_default = {
             "proxy_use": "True",
             "proxy_url": "",
-            "quality_preference": "hd,original,sd",
+            "quality_preference": "original,hd,sd",
             "channel_urls": json.dumps(DEFAULT_CHANNEL_URLS, ensure_ascii=False),
         }
 
@@ -486,15 +562,20 @@ class ModuleMain(PluginModuleBase):
                 logger.info("[SOOP_KBO] 캐시 초기화: %d개", count)
                 return jsonify({"count": count})
             if sub == "channel_list":
-                rows = [
-                    {
-                        "source": "soop_kbo",
-                        "channel_id": ch["id"],
-                        "name": ch["name"],
-                        "program": {"title": "LIVE"},
-                    }
-                    for ch in _channel_list()
-                ]
+                sess = _http_session()
+                rows = []
+                for ch in _channel_list():
+                    meta = _get_channel_live_meta_cached(ch["id"], ch["url"], sess)
+                    title = meta.get("title") or ("방송 중" if meta.get("onair") else "오프에어")
+                    rows.append(
+                        {
+                            "source": "soop_kbo",
+                            "channel_id": ch["id"],
+                            "name": ch["name"],
+                            "program": {"title": title},
+                        }
+                    )
+
                 from datetime import datetime
                 return jsonify({"list": rows, "updated_at": datetime.now().isoformat()})
             if sub == "play_url":
@@ -617,14 +698,14 @@ def soop_kbo_cache_clear():
 def soop_kbo_proxy_check():
     """현재 설정된 프록시의 외부 출구 IP를 확인."""
     try:
-        proxy_url = _required_proxy_url()
+        proxy_url = _get_proxy_url()
         sess = _http_session()
         resp = sess.get("https://api.ipify.org?format=json", timeout=8)
         resp.raise_for_status()
         payload = resp.json() if resp.text else {}
         return jsonify({
             "ok": True,
-            "proxy_url": proxy_url,
+            "proxy_url": proxy_url or "(직접 연결)",
             "egress_ip": payload.get("ip"),
         })
     except Exception as e:
