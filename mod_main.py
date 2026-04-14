@@ -20,7 +20,6 @@ import os
 import re
 import threading
 import time
-import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from urllib.parse import urljoin, urlparse
@@ -713,17 +712,8 @@ class ModuleMain(PluginModuleBase):
                 return jsonify({"count": count})
             if sub == "channel_list":
                 from datetime import datetime
-                try:
-                    rows, summary = _refresh_channel_titles("WEB")
-                    return jsonify({"list": rows, "updated_at": datetime.now().isoformat(), "summary": summary})
-                except Exception as e:
-                    logger.error("[SOOP_KBO][WEB] channel_list 실패: %s", e)
-                    logger.error(traceback.format_exc())
-                    return jsonify({
-                        "list": _fallback_rows_waiting(),
-                        "updated_at": datetime.now().isoformat(),
-                        "error": str(e),
-                    }), 200
+                rows = _rows_from_title_cache()
+                return jsonify({"list": rows, "updated_at": datetime.now().isoformat()})
             if sub == "play_url":
                 form = req.form.to_dict()
                 channel_id = form.get("channel_id", "")
