@@ -20,6 +20,7 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from urllib.parse import urljoin, urlparse
 
@@ -436,7 +437,7 @@ def _fetch_channel_live_meta(page_url: str, sess: requests.Session) -> dict:
         req_payload = dict(payload)
         if extra:
             req_payload.update(extra)
-        resp = sess.post(CHANNEL_API_URL, data=req_payload, headers=headers, timeout=15)
+        resp = sess.post(CHANNEL_API_URL, data=req_payload, headers=headers, timeout=5)
         resp.raise_for_status()
         return resp.json()
 
@@ -461,6 +462,31 @@ def _fetch_channel_live_meta(page_url: str, sess: requests.Session) -> dict:
     }
 
 
+def _fetch_title_from_page(page_url: str, sess: requests.Session) -> str:
+    """페이지 HTML에서 제목 fallback 추출 (//*[@id='infoTitle'] 포함)."""
+    try:
+        resp = sess.get(page_url, timeout=5)
+        resp.raise_for_status()
+        text = resp.text
+        # 1) 요청하신 id=infoTitle 영역
+        m = re.search(r'id=["\']infoTitle["\'][^>]*>(.*?)<', text, flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            title = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+            if title:
+                return title
+        # 2) JS 변수
+        m = re.search(r'window\.szBroadTitle\s*=\s*["\']([^"\']+)["\']', text)
+        if m:
+            return m.group(1).strip()
+        # 3) og:title
+        m = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', text, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    except Exception:
+        logger.exception("[SOOP_KBO] 페이지 제목 fallback 실패: %s", page_url)
+    return ""
+
+
 def _get_channel_live_meta_cached(channel_id: str, page_url: str, sess: requests.Session) -> dict:
     now = time.time()
     with _title_cache_lock:
@@ -470,9 +496,11 @@ def _get_channel_live_meta_cached(channel_id: str, page_url: str, sess: requests
                 return item
     try:
         item = _fetch_channel_live_meta(page_url, sess)
+        if not item.get("title"):
+            item["title"] = _fetch_title_from_page(page_url, sess)
     except Exception:
         logger.exception("[SOOP_KBO] 경기정보 조회 실패: %s", channel_id)
-        item = {"onair": False, "title": "", "bj_id": _parse_bj_id(page_url)}
+        item = {"onair": False, "title": _fetch_title_from_page(page_url, sess), "bj_id": _parse_bj_id(page_url)}
     with _title_cache_lock:
         _title_cache[channel_id] = (item, now)
     return item
@@ -562,19 +590,52 @@ class ModuleMain(PluginModuleBase):
                 logger.info("[SOOP_KBO] 캐시 초기화: %d개", count)
                 return jsonify({"count": count})
             if sub == "channel_list":
-                sess = _http_session()
-                rows = []
-                for ch in _channel_list():
+                started_at = time.time()
+                channels = _channel_list()
+                logger.info("[SOOP_KBO] channel_list start channels=%d", len(channels))
+
+                def build_row(ch: dict) -> dict:
+                    t0 = time.time()
+                    sess = _http_session()
                     meta = _get_channel_live_meta_cached(ch["id"], ch["url"], sess)
                     title = meta.get("title") or ("방송 중" if meta.get("onair") else "오프에어")
-                    rows.append(
-                        {
-                            "source": "soop_kbo",
-                            "channel_id": ch["id"],
-                            "name": ch["name"],
-                            "program": {"title": title},
-                        }
+                    elapsed = round((time.time() - t0) * 1000)
+                    logger.info(
+                        "[SOOP_KBO] channel_list item id=%s onair=%s title=%s elapsed_ms=%s",
+                        ch["id"],
+                        meta.get("onair"),
+                        (title[:80] if isinstance(title, str) else title),
+                        elapsed,
                     )
+                    return {
+                        "source": "soop_kbo",
+                        "channel_id": ch["id"],
+                        "name": ch["name"],
+                        "program": {"title": title},
+                    }
+
+                rows = []
+                with ThreadPoolExecutor(max_workers=min(5, len(channels) or 1)) as exe:
+                    fut_map = {exe.submit(build_row, ch): ch for ch in channels}
+                    for fut in as_completed(fut_map):
+                        ch = fut_map[fut]
+                        try:
+                            rows.append(fut.result())
+                        except Exception:
+                            logger.exception("[SOOP_KBO] channel_list item 실패: %s", ch["id"])
+                            rows.append(
+                                {
+                                    "source": "soop_kbo",
+                                    "channel_id": ch["id"],
+                                    "name": ch["name"],
+                                    "program": {"title": "조회 실패"},
+                                }
+                            )
+
+                # 채널 순서 고정
+                order = {ch["id"]: idx for idx, ch in enumerate(channels)}
+                rows.sort(key=lambda x: order.get(x["channel_id"], 999))
+                logger.info("[SOOP_KBO] channel_list done elapsed_ms=%d", int((time.time() - started_at) * 1000))
 
                 from datetime import datetime
                 return jsonify({"list": rows, "updated_at": datetime.now().isoformat()})
@@ -589,6 +650,7 @@ class ModuleMain(PluginModuleBase):
                 return jsonify({"data": {"url": url, "title": CHANNEL_NAMES.get(channel_id, channel_id)}})
         except Exception:
             logger.exception("AJAX 처리 중 예외:")
+            return jsonify({"list": [], "updated_at": "", "error": "channel_list_failed"}), 500
 
 
 # ─── 라우트 ───────────────────────────────────────────────────────────────────
