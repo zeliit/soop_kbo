@@ -2,7 +2,7 @@
 {% block content %}
 
 <div>
-  {{ macros.m_button_group([['list_reload_btn', '새로고침']])}}
+  {{ macros.m_button_group([['channel_refresh_btn', '경기명 즉시 조회']])}}
   <p class="mt-2 mb-1 text-sm small text-muted">마지막 업데이트: <span id="list_info">없음</span></p>
   <div id="list_div" class="mb-3">
     <table id="result_table" class="table table-sm table-striped table-hover">
@@ -25,7 +25,6 @@ $(document).ready(function(){
 });
 
 function load_channel_list() {
-  $('#channel-list').html('<tr><td colspan="3">로딩중...</td></tr>');
   $.ajax({
     url: `/${PACKAGE_NAME}/ajax/channel_list`,
     type: "POST",
@@ -40,15 +39,34 @@ function load_channel_list() {
       make_channel_list((data && data.list) ? data.list : make_waiting_rows());
     },
     error: function() {
-      $('#list_info').text('조회 실패');
       make_channel_list(make_waiting_rows());
     }
   });
 }
 
-$("body").on('click', '#list_reload_btn', function(e){
+$("body").on('click', '#channel_refresh_btn', function(e){
   e.preventDefault();
-  load_channel_list();
+  var $btn = $(this);
+  $btn.prop('disabled', true).text('조회중...');
+  $('#channel-list').html('<tr><td colspan="3">조회중...</td></tr>');
+  $.ajax({
+    url: `/${PACKAGE_NAME}/ajax/channel_list_refresh`,
+    type: "POST",
+    cache: false,
+    dataType: "json",
+    success: function(data) {
+      if (data && data.updated_at) {
+        $('#list_info').text(new Date(data.updated_at).toLocaleString());
+      }
+      make_channel_list((data && data.list) ? data.list : make_waiting_rows());
+    },
+    error: function() {
+      make_channel_list(make_waiting_rows());
+    },
+    complete: function() {
+      $btn.prop('disabled', false).text('경기명 즉시 조회');
+    }
+  });
 });
 
 function make_channel_list(data) {
@@ -60,7 +78,7 @@ function make_channel_list(data) {
   var rows = '';
   data.forEach(function(item) {
     var ch_id = item.channel_id || '';
-    var title = (item.program && item.program.title) ? item.program.title : '대기중';
+    var title = (item.program && item.program.title) ? item.program.title : '경기 대기중입니다';
     var url = '/' + PACKAGE_NAME + '/channel/' + ch_id + '.m3u8';
     rows += '<tr>';
     rows += '<td style="text-align:left;">' + ch_id + '</td>';
@@ -76,7 +94,7 @@ function make_waiting_rows() {
   for (var i = 1; i <= 5; i += 1) {
     rows.push({
       channel_id: 'kboglobal' + i,
-      program: { title: '대기중' }
+      program: { title: '경기 대기중입니다' }
     });
   }
   return rows;

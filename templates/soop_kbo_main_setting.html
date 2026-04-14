@@ -15,7 +15,7 @@
   <form id='setting' name='setting'>
     <div class="tab-content" id="nav-tabContent">
       {{ macros.m_tab_content_start('normal', true) }}
-        {{ macros.setting_input_text('proxy_url', '해외 Proxy URL (선택)', value=arg['proxy_url'], desc=['SOOP KBO는 한국 IP에서 재생 불가 → 해외 프록시 권장', '예) http://user_id:password@1.2.3.4:port', '서버가 해외면 비워도 됩니다']) }}
+        {{ macros.setting_input_text('proxy_url', '해외 Proxy URL (선택)', value=arg['proxy_url'], desc=['SOOP KBO는 한국 IP에서 재생 불가 → 해외 프록시 권장', '예) http://user_id:password@192.168.0.1:port', '서버가 해외면 비워도 됩니다']) }}
         {{ macros.setting_input_text('quality_preference', '화질 우선순위', value=arg['quality_preference'], desc=['끊김이 있으면 hd/sd를 앞에 두세요', '예) original,hd,sd']) }}
 
         {{ macros.m_hr() }}

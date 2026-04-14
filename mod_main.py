@@ -528,8 +528,8 @@ def _refresh_channel_titles(log_prefix: str = "WEB") -> tuple[list[dict], str]:
         sess = _build_http_session(proxy_url)
         meta = _get_channel_live_meta_cached(ch["id"], ch["url"], sess)
         title = (meta.get("title") or "").strip() if isinstance(meta.get("title"), str) else ""
-        if not title:
-            title = "대기중"
+        if not title or "오프라인" in title:
+            title = "경기 대기중입니다"
         elapsed = round((time.time() - t0) * 1000)
         logger.info(
             "[SOOP_KBO][%s] channel_list item id=%s onair=%s title=%s elapsed_ms=%s",
@@ -559,7 +559,7 @@ def _refresh_channel_titles(log_prefix: str = "WEB") -> tuple[list[dict], str]:
                         "source": "soop_kbo",
                         "channel_id": ch["id"],
                         "name": ch["name"],
-                        "program": {"title": "대기중"},
+                        "program": {"title": "경기 대기중입니다"},
                     }
                 )
 
@@ -662,7 +662,7 @@ class ModuleMain(PluginModuleBase):
             "quality_preference": "original,hd,sd",
             "channel_urls": json.dumps(DEFAULT_CHANNEL_URLS, ensure_ascii=False),
             "main_auto_start": "False",
-            "main_interval": "*/10 * * * *",
+            "main_interval": "10",
             "schedule_last_run": "",
             "schedule_last_result": "",
             "channel_list_cache": "",
@@ -753,6 +753,23 @@ class ModuleMain(PluginModuleBase):
 
 
 # ─── 라우트 ───────────────────────────────────────────────────────────────────
+@blueprint.route("/ajax/channel_list_refresh", methods=["POST"])
+def soop_kbo_ajax_channel_list_refresh():
+    from datetime import datetime
+    logger.info("[SOOP_KBO][AJAX-REFRESH] 즉시 조회 시작")
+    try:
+        rows, summary = _refresh_channel_titles("WEB")
+        cache_json = json.dumps(rows, ensure_ascii=False)
+        ModelSetting.set("channel_list_cache", cache_json)
+        updated_at = datetime.now().isoformat()
+        ModelSetting.set("channel_list_updated_at", updated_at)
+        logger.info("[SOOP_KBO][AJAX-REFRESH] 완료 %s", summary)
+        return jsonify({"list": rows, "updated_at": updated_at})
+    except Exception:
+        logger.exception("[SOOP_KBO][AJAX-REFRESH] 오류")
+        return jsonify({"list": _fallback_rows_waiting(), "updated_at": datetime.now().isoformat()})
+
+
 @blueprint.route("/ajax/channel_list", methods=["POST"])
 def soop_kbo_ajax_channel_list():
     raw = ModelSetting.get("channel_list_cache") or ""
