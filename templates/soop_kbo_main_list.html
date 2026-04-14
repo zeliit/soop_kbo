@@ -14,13 +14,6 @@
         </tr>
       </thead>
       <tbody id="channel-list">
-        <template id="channel-template">
-          <tr>
-            <td style="text-align:left;" id="ch-name"></td>
-            <td style="text-align:left;" id="ch-program"></td>
-            <td style="width:120px; text-align:center;" id="ch-play"></td>
-          </tr>
-        </template>
       </tbody>
     </table>
   </div>
@@ -63,26 +56,23 @@ $("body").on('click', '#list_reload_btn', function(e){
 });
 
 function make_channel_list(data) {
-  var scroller = document.querySelector('#channel-list');
-  scroller.querySelectorAll('tr').forEach(e => e.remove());
+  var tbody = document.getElementById('channel-list');
   if (!data || data.length === 0) {
-    scroller.insertAdjacentHTML('beforeend', '<tr><td colspan="3">채널 없음</td></tr>');
+    tbody.innerHTML = '<tr><td colspan="3">채널 없음</td></tr>';
     return;
   }
-  var tmpl = document.querySelector('#channel-template');
+  var rows = '';
   data.forEach(function(item) {
-    var clone = tmpl.content.cloneNode(true);
-    clone.querySelector('#ch-name').textContent = item.channel_id;
-    var title = (item.program && item.program.title) ? item.program.title : '';
-    if (!title || title.indexOf('조회 실패') >= 0) {
-      title = '대기중';
-    }
-    clone.querySelector('#ch-program').textContent = title;
-    var url = `/${PACKAGE_NAME}/channel/${item.channel_id}.m3u8`;
-    clone.querySelector('#ch-play').innerHTML =
-      '<a href="' + url + '" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-secondary">새탭</a>';
-    scroller.appendChild(clone);
+    var ch_id = item.channel_id || '';
+    var title = (item.program && item.program.title) ? item.program.title : '대기중';
+    var url = '/' + PACKAGE_NAME + '/channel/' + ch_id + '.m3u8';
+    rows += '<tr>';
+    rows += '<td style="text-align:left;">' + ch_id + '</td>';
+    rows += '<td style="text-align:left;">' + title + '</td>';
+    rows += '<td style="width:120px; text-align:center;"><a href="' + url + '" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-secondary">재생</a></td>';
+    rows += '</tr>';
   });
+  tbody.innerHTML = rows;
 }
 
 function make_waiting_rows() {
