@@ -97,6 +97,13 @@ def _channel_list() -> list[dict]:
             "name": CHANNEL_NAMES.get(ch_id, ch_id),
             "url": url,
         })
+    def sort_key(item: dict) -> tuple[int, str]:
+        m = re.search(r"(\d+)$", item.get("id", ""))
+        if m:
+            return (int(m.group(1)), item.get("id", ""))
+        return (9999, item.get("id", ""))
+
+    result.sort(key=sort_key)
     return result
 
 
@@ -521,7 +528,9 @@ def _refresh_channel_titles(log_prefix: str = "WEB") -> tuple[list[dict], str]:
         # requests.Session은 thread-safe 보장이 없어 스레드별 세션 사용
         sess = _build_http_session(proxy_url)
         meta = _get_channel_live_meta_cached(ch["id"], ch["url"], sess)
-        title = meta.get("title") or ("방송 중" if meta.get("onair") else "오프에어")
+        title = (meta.get("title") or "").strip() if isinstance(meta.get("title"), str) else ""
+        if not title:
+            title = "대기중"
         elapsed = round((time.time() - t0) * 1000)
         logger.info(
             "[SOOP_KBO][%s] channel_list item id=%s onair=%s title=%s elapsed_ms=%s",
@@ -551,7 +560,7 @@ def _refresh_channel_titles(log_prefix: str = "WEB") -> tuple[list[dict], str]:
                         "source": "soop_kbo",
                         "channel_id": ch["id"],
                         "name": ch["name"],
-                        "program": {"title": "조회 실패"},
+                        "program": {"title": "대기중"},
                     }
                 )
 
@@ -582,6 +591,19 @@ def _rows_from_title_cache() -> list[dict]:
                 }
             )
     return rows
+
+
+def _fallback_rows_waiting() -> list[dict]:
+    """API 조회 실패 시 UI에 항상 표시할 기본 rows."""
+    return [
+        {
+            "source": "soop_kbo",
+            "channel_id": ch["id"],
+            "name": ch["name"],
+            "program": {"title": "대기중"},
+        }
+        for ch in _channel_list()
+    ]
 
 
 # ─── M3U8 처리 ───────────────────────────────────────────────────────────────
@@ -698,7 +720,7 @@ class ModuleMain(PluginModuleBase):
                     logger.error("[SOOP_KBO][WEB] channel_list 실패: %s", e)
                     logger.error(traceback.format_exc())
                     return jsonify({
-                        "list": [],
+                        "list": _fallback_rows_waiting(),
                         "updated_at": datetime.now().isoformat(),
                         "error": str(e),
                     }), 200
@@ -713,7 +735,12 @@ class ModuleMain(PluginModuleBase):
                 return jsonify({"data": {"url": url, "title": CHANNEL_NAMES.get(channel_id, channel_id)}})
         except Exception:
             logger.exception("AJAX 처리 중 예외:")
-            return jsonify({"list": [], "updated_at": "", "error": "ajax_failed"}), 200
+            from datetime import datetime
+            return jsonify({
+                "list": _fallback_rows_waiting(),
+                "updated_at": datetime.now().isoformat(),
+                "error": "ajax_failed",
+            }), 200
 
 
 # ─── 라우트 ───────────────────────────────────────────────────────────────────
