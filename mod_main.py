@@ -72,6 +72,18 @@ CHANNEL_NAMES = {
     "kboglobal5": "SOOP KBO5",
 }
 
+_TEAM_KO = {
+    "LOTTE": "롯데", "DOOSAN": "두산", "KIWOOM": "키움",
+    "KIA": "기아", "SAMSUNG": "삼성", "HANWHA": "한화",
+}
+
+
+def _localize_title(title: str) -> str:
+    """경기명의 영문 팀명을 한글로 치환."""
+    for en, ko in _TEAM_KO.items():
+        title = title.replace(en, ko)
+    return title
+
 
 def _load_channel_urls() -> dict:
     """DB에서 채널 URL을 로드. 없으면 기본값 반환."""
@@ -530,6 +542,8 @@ def _refresh_channel_titles(log_prefix: str = "WEB") -> tuple[list[dict], str]:
         title = (meta.get("title") or "").strip() if isinstance(meta.get("title"), str) else ""
         if not title or "오프라인" in title:
             title = "경기 대기중입니다"
+        else:
+            title = _localize_title(title)
         elapsed = round((time.time() - t0) * 1000)
         logger.info(
             "[SOOP_KBO][%s] channel_list item id=%s onair=%s title=%s elapsed_ms=%s",
