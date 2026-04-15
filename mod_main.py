@@ -789,11 +789,25 @@ def soop_kbo_ajax_channel_list():
 @blueprint.route("/playlist.m3u8")
 def soop_kbo_playlist():
     pb = _proxy_base()
+    # DB 캐시에서 channel_id → title 매핑 구성
+    title_map: dict[str, str] = {}
+    try:
+        raw = ModelSetting.get("channel_list_cache") or ""
+        if raw:
+            for row in json.loads(raw):
+                ch_id = row.get("channel_id", "")
+                title = row.get("program", {}).get("title", "")
+                if ch_id and title and "대기중" not in title:
+                    title_map[ch_id] = title
+    except Exception:
+        logger.exception("[SOOP_KBO] playlist title_map 구성 실패")
+
     lines = ["#EXTM3U", f"# SOOP_KBO_VERSION={PLUGIN_VERSION}"]
     for idx, ch in enumerate(_channel_list(), 1):
+        display = title_map.get(ch["id"], ch["name"])
         lines.append(
-            f'#EXTINF:-1 tvg-id="{ch["id"]}" tvg-name="{ch["name"]}" '
-            f'group-title="KBO" tvg-chno="{idx}",{ch["name"]}'
+            f'#EXTINF:-1 tvg-id="{ch["id"]}" tvg-name="{display}" '
+            f'group-title="KBO" tvg-chno="{idx}",{display}'
         )
         lines.append(f"{pb}/channel/{ch['id']}.m3u8")
     return Response("\n".join(lines) + "\n", content_type="audio/mpegurl")
