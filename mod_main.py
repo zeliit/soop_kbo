@@ -832,25 +832,17 @@ def soop_kbo_channel(channel_id: str):
     urls = _load_channel_urls()
     if channel_id not in urls:
         abort(404)
-    for attempt in range(2):
-        try:
-            hls_url = _get_hls_url(channel_id)
-            sess = _http_session()
-            resp = sess.get(hls_url, timeout=15)
-            if resp.status_code == 403 and attempt == 0:
-                logger.warning("[SOOP_KBO] 채널 m3u8 403 ch=%s → 캐시 무효화 후 재시도", channel_id)
-                with _cache_lock:
-                    _cache.pop(channel_id, None)
-                continue
-            resp.raise_for_status()
-            return Response(_rewrite_m3u8(resp.text, hls_url, channel_id), content_type="application/vnd.apple.mpegurl")
-        except Exception:
-            logger.exception("[SOOP_KBO] 채널 오류 ch=%s attempt=%d", channel_id, attempt)
-            with _cache_lock:
-                _cache.pop(channel_id, None)
-            if attempt == 0:
-                continue
-    abort(503)
+    try:
+        hls_url = _get_hls_url(channel_id)
+        sess = _http_session()
+        resp = sess.get(hls_url, timeout=15)
+        resp.raise_for_status()
+        return Response(_rewrite_m3u8(resp.text, hls_url, channel_id), content_type="application/vnd.apple.mpegurl")
+    except Exception:
+        logger.exception("[SOOP_KBO] 채널 오류: %s", channel_id)
+        with _cache_lock:
+            _cache.pop(channel_id, None)
+        abort(503)
 
 
 @blueprint.route("/sub")
