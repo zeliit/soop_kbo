@@ -672,6 +672,7 @@ def _write_show_yaml() -> tuple[bool, str]:
     }
 
     try:
+        import shutil
         output_dir = Path(library_path) / "kbo"
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / "show.yaml"
@@ -680,6 +681,16 @@ def _write_show_yaml() -> tuple[bool, str]:
             encoding="utf-8",
         )
         logger.info("[SOOP_KBO] show.yaml 생성: %s", output_path)
+
+        # file/ 폴더의 파일을 라이브러리 폴더에 복사
+        file_src_dir = Path(__file__).parent / "file"
+        if file_src_dir.is_dir():
+            for src_file in file_src_dir.iterdir():
+                if src_file.is_file():
+                    dst_file = output_dir / src_file.name
+                    shutil.copy2(src_file, dst_file)
+                    logger.info("[SOOP_KBO] 파일 복사: %s → %s", src_file.name, dst_file)
+
         return True, str(output_path)
     except Exception as e:
         logger.exception("[SOOP_KBO] show.yaml 생성 실패")
