@@ -679,10 +679,19 @@ def _write_show_yaml() -> tuple[bool, str]:
 
     library_path = (ModelSetting.get("library_path") or "").strip()
     stream_base_url = (ModelSetting.get("stream_base_url") or "").strip().rstrip("/")
+    plex_section_id = (ModelSetting.get("plex_section_id") or "").strip()
+
+    missing = []
     if not library_path:
-        return False, "library_path 미설정"
+        missing.append("library_path")
     if not stream_base_url:
-        return False, "stream_base_url 미설정"
+        missing.append("stream_base_url")
+    if not plex_section_id:
+        missing.append("plex_section_id")
+    if missing:
+        msg = f"미설정 항목: {', '.join(missing)}"
+        logger.info("[SOOP_KBO] show.yaml 건너뜀 - %s", msg)
+        return False, msg
 
     # 캐시에서 채널별 경기명 가져오기 (없으면 기본값 사용)
     title_map: dict[str, str] = {}
@@ -877,7 +886,7 @@ class ModuleMain(PluginModuleBase):
                 rok, rmsg = _trigger_plex_refresh()
                 logger.info("[SOOP_KBO][SCHED] Plex refresh: ok=%s %s", rok, rmsg)
             else:
-                logger.debug("[SOOP_KBO][SCHED] show.yaml 미생성: %s", msg)
+                logger.info("[SOOP_KBO][SCHED] show.yaml 건너뜀: %s", msg)
         except Exception:
             logger.exception("[SOOP_KBO][SCHED] 실행 오류")
             ModelSetting.set("schedule_last_result", "error")
