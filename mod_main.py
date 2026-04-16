@@ -22,6 +22,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from base64 import urlsafe_b64decode, urlsafe_b64encode
+from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -619,6 +620,72 @@ def _fallback_rows_waiting() -> list[dict]:
     ]
 
 
+def _write_show_yaml() -> tuple[bool, str]:
+    """library_path/kbo/show.yaml 생성. 경기명 캐시가 있으면 title에 반영."""
+    try:
+        import yaml
+    except ImportError:
+        return False, "PyYAML 미설치"
+
+    from datetime import datetime
+
+    library_path = (ModelSetting.get("library_path") or "").strip()
+    stream_base_url = (ModelSetting.get("stream_base_url") or "").strip().rstrip("/")
+    if not library_path:
+        return False, "library_path 미설정"
+    if not stream_base_url:
+        return False, "stream_base_url 미설정"
+
+    # 캐시에서 채널별 경기명 가져오기 (없으면 기본값 사용)
+    title_map: dict[str, str] = {}
+    try:
+        raw = ModelSetting.get("channel_list_cache") or ""
+        if raw:
+            for row in json.loads(raw):
+                ch_id = row.get("channel_id", "")
+                title = row.get("program", {}).get("title", "")
+                if ch_id and title and "대기중" not in title:
+                    title_map[ch_id] = title
+    except Exception:
+        logger.exception("[SOOP_KBO] show.yaml title_map 구성 실패")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    extras = []
+    for i in range(1, 6):
+        ch_id = f"kboglobal{i}"
+        title = title_map.get(ch_id, f"SOOP KBO{i}")
+        extras.append({
+            "mode": "m3u8",
+            "type": "featurette",
+            "param": f"{stream_base_url}/soop_kbo/channel/{ch_id}.m3u8",
+            "title": title,
+            "thumb": f"https://raw.githubusercontent.com/zeliit/PlexLiveTV/main/thumb/soop_kbo{i}.png",
+        })
+
+    show = {
+        "primary": True,
+        "code": "kbo",
+        "title": "숲 한국 프로야구",
+        "posters": "https://raw.githubusercontent.com/zeliit/PlexLiveTV/main/poster/kbo.webp",
+        "summary": f"SOOP KBO 채널\n\n  {now}",
+        "extras": extras,
+    }
+
+    try:
+        output_dir = Path(library_path) / "kbo"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / "show.yaml"
+        output_path.write_text(
+            yaml.safe_dump(show, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        logger.info("[SOOP_KBO] show.yaml 생성: %s", output_path)
+        return True, str(output_path)
+    except Exception as e:
+        logger.exception("[SOOP_KBO] show.yaml 생성 실패")
+        return False, str(e)
+
+
 # ─── M3U8 처리 ───────────────────────────────────────────────────────────────
 def _b64enc(s: str) -> str:
     return urlsafe_b64encode(s.encode()).decode()
@@ -681,7 +748,35 @@ class ModuleMain(PluginModuleBase):
             "schedule_last_result": "",
             "channel_list_cache": "",
             "channel_list_updated_at": "",
+            "library_path": "",
+            "stream_base_url": "",
         }
+        # db_default는 최초 설치 시에만 동작 → 업그레이드 시 누락 키 보완
+        # ModelSetting.set()은 UPDATE만 하므로 없는 키에는 raw INSERT OR IGNORE 필요
+        _migration_keys = [
+            ("library_path", ""),
+            ("stream_base_url", ""),
+            ("channel_list_cache", ""),
+            ("channel_list_updated_at", ""),
+        ]
+        try:
+            _app = getattr(F, 'app', None)
+            if _app:
+                with _app.app_context():
+                    _conn = F.db.engine.raw_connection()
+                    try:
+                        _cur = _conn.cursor()
+                        for _key, _default in _migration_keys:
+                            _cur.execute(
+                                f'INSERT OR IGNORE INTO {package_name}_setting ("key", value) VALUES (?, ?)',
+                                (_key, _default),
+                            )
+                            logger.debug("[SOOP_KBO] DB키 마이그레이션: %s", _key)
+                        _conn.commit()
+                    finally:
+                        _conn.close()
+        except Exception:
+            logger.exception("[SOOP_KBO] DB키 마이그레이션 실패")
 
     def process_menu(self, sub, _req):
         try:
@@ -714,6 +809,12 @@ class ModuleMain(PluginModuleBase):
             logger.info("[SOOP_KBO][SCHED] DB저장 검증 saved_len=%d match=%s preview=%s",
                         len(verify), len(verify) == len(cache_json), verify[:80])
             logger.info("[SOOP_KBO][SCHED] %s", result_msg)
+            # show.yaml 자동 갱신 (library_path 설정된 경우)
+            ok, msg = _write_show_yaml()
+            if ok:
+                logger.info("[SOOP_KBO][SCHED] show.yaml 갱신: %s", msg)
+            else:
+                logger.debug("[SOOP_KBO][SCHED] show.yaml 미생성: %s", msg)
         except Exception:
             logger.exception("[SOOP_KBO][SCHED] 실행 오류")
             ModelSetting.set("schedule_last_result", "error")
@@ -726,6 +827,10 @@ class ModuleMain(PluginModuleBase):
         try:
             if sub == "setting_save":
                 saved, _ = P.ModelSetting.setting_save(req)
+                if saved:
+                    ok, msg = _write_show_yaml()
+                    if ok:
+                        logger.info("[SOOP_KBO] 설정 저장 후 show.yaml 갱신: %s", msg)
                 return jsonify(saved)
             if sub == "cache_clear":
                 with _cache_lock:
@@ -767,6 +872,12 @@ class ModuleMain(PluginModuleBase):
 
 
 # ─── 라우트 ───────────────────────────────────────────────────────────────────
+@blueprint.route("/ajax/write_show_yaml", methods=["POST"])
+def soop_kbo_ajax_write_show_yaml():
+    ok, msg = _write_show_yaml()
+    return jsonify({"ok": ok, "msg": msg})
+
+
 @blueprint.route("/ajax/channel_list_refresh", methods=["POST"])
 def soop_kbo_ajax_channel_list_refresh():
     from datetime import datetime
