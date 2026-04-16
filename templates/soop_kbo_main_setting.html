@@ -9,6 +9,7 @@
   <nav>
     {{ macros.m_tab_head_start() }}
     {{ macros.m_tab_head('normal', '설정', true) }}
+    {{ macros.m_tab_head('plex', 'Plex 설정', false) }}
     {{ macros.m_tab_head('auto', '자동', false) }}
     {{ macros.m_tab_head_end() }}
   </nav>
@@ -24,15 +25,16 @@
       {{ macros.m_hr() }}
 
       {{ macros.info_text_go_buttons('playlist_url', '플레이리스트', [['globalCliboardBtn','클립보드에 복사', [['text',
-      arg['playlist_url']]]]], value=arg['playlist_url'], desc=['Plex / IPTV 플레이어에 입력하세요']) }}
+      arg['playlist_url']]]]], value=arg['playlist_url'], desc=['IPTV 플레이어에 입력하세요']) }}
+      {{ macros.m_tab_content_end() }}
 
-      {{ macros.m_hr() }}
-
+      {{ macros.m_tab_content_start('plex', false) }}
       {{ macros.setting_input_text('library_path', 'Plex 라이브러리 위치', value=arg['library_path'], desc=['show.yaml을 생성할 폴더
       경로', '예) /mnt/PlexLiveTV']) }}
       {{ macros.setting_input_text('stream_base_url', '스트림 베이스 URL', value=arg['stream_base_url'], desc=['FF 주소 입력. 채널
       URL 앞부분 (끝 / 제외)', '예) https://ff.example.com']) }}
-      {{ macros.setting_input_text_and_buttons('plex_section_id', 'Plex 섹션 ID', [['checkSectionDbBtn', 'DB섹션 확인']], value=arg['plex_section_id'], desc=['show.yaml 생성 후 메타데이터 자동 새로 고침에 사용', '비워두면 새로 고침 생략']) }}
+      {{ macros.setting_input_text_and_buttons('plex_section_id', 'Plex 섹션 ID', [['checkSectionDbBtn', 'DB섹션 확인']],
+      value=arg['plex_section_id'], desc=['show.yaml 생성 후 메타데이터 자동 새로 고침에 사용', '비워두면 새로 고침 생략']) }}
       {{ macros.setting_button_with_info([['showYamlBtn', 'show.yaml 생성']], left='Plex 연동', desc=['kbo/show.yaml을 라이브러리
       폴더에 생성하고 Plex 메타데이터를 새로 고침합니다', '설정 저장 시 및 스케줄러 실행 시 자동 갱신됩니다']) }}
       {{ macros.m_tab_content_end() }}
