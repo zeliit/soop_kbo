@@ -935,6 +935,28 @@ class ModuleMain(PluginModuleBase):
 
 
 # ─── 라우트 ───────────────────────────────────────────────────────────────────
+@blueprint.route("/ajax/check_section_db", methods=["POST"])
+def soop_kbo_ajax_check_section_db():
+    try:
+        plugin = F.PluginManager.get_plugin_instance("plex_mate")
+        if plugin is None or not hasattr(plugin, "PlexDBHandle") or not hasattr(plugin, "ModelSetting"):
+            return jsonify({"ret": "warning", "msg": "plex_mate 플러그인을 찾을 수 없습니다"})
+        db_file = (plugin.ModelSetting.get("base_path_db") or "").strip()
+        if not db_file:
+            return jsonify({"ret": "warning", "msg": "plex_mate base_path_db 설정이 비어 있습니다"})
+        rows = plugin.PlexDBHandle.library_sections(db_file=db_file)
+        if rows is None:
+            return jsonify({"ret": "warning", "msg": f"DB 열기 실패: {db_file}"})
+        return jsonify({
+            "ret": "success",
+            "title": f"Library sections ({db_file})",
+            "modal": json.dumps(rows, indent=4, ensure_ascii=False),
+        })
+    except Exception as e:
+        logger.exception("[SOOP_KBO] check_section_db 실패")
+        return jsonify({"ret": "danger", "msg": f"조회 실패: {e}"})
+
+
 @blueprint.route("/ajax/write_show_yaml", methods=["POST"])
 def soop_kbo_ajax_write_show_yaml():
     ok, msg = _write_show_yaml()
