@@ -620,6 +620,54 @@ def _fallback_rows_waiting() -> list[dict]:
     ]
 
 
+def _trigger_plex_refresh() -> tuple[bool, str]:
+    """plex_mate 경유 또는 Plex API 직접 호출로 섹션 메타데이터 새로 고침."""
+    try:
+        section_id = int((ModelSetting.get("plex_section_id") or "0").strip())
+    except Exception:
+        return False, "invalid plex_section_id"
+    if section_id <= 0:
+        return False, "plex_section_id 미설정"
+
+    # 1) plex_mate PlexWebHandle 경유
+    try:
+        plugin = F.PluginManager.get_plugin_instance("plex_mate")
+        if plugin is not None and hasattr(plugin, "PlexWebHandle"):
+            handle = plugin.PlexWebHandle
+            for method_name in ("section_refresh", "section_refresh_metadata", "refresh_section"):
+                method = getattr(handle, method_name, None)
+                if callable(method):
+                    method(section_id)
+                    return True, f"plex_mate {method_name} ok: section={section_id}"
+    except Exception:
+        logger.exception("[SOOP_KBO] plex_mate refresh 실패")
+
+    # 2) Plex API 직접 호출 (plex_mate base_url/base_token 사용)
+    plex_url = plex_token = ""
+    try:
+        plugin = F.PluginManager.get_plugin_instance("plex_mate")
+        if plugin is not None and hasattr(plugin, "ModelSetting"):
+            plex_url = (plugin.ModelSetting.get("base_url") or "").strip().rstrip("/")
+            plex_token = (plugin.ModelSetting.get("base_token") or "").strip()
+    except Exception:
+        logger.exception("[SOOP_KBO] plex_mate 설정 조회 실패")
+
+    if not plex_url or not plex_token:
+        return False, "plex_mate base_url/base_token 미설정"
+
+    try:
+        resp = requests.get(
+            f"{plex_url}/library/sections/{section_id}/refresh",
+            params={"X-Plex-Token": plex_token, "force": "1"},
+            timeout=15,
+        )
+        if str(resp.status_code).startswith("2"):
+            return True, f"Plex API refresh ok: section={section_id}"
+        return False, f"Plex API status={resp.status_code}"
+    except Exception as e:
+        return False, f"Plex refresh 예외: {e}"
+
+
 def _write_show_yaml() -> tuple[bool, str]:
     """library_path/kbo/show.yaml 생성. 경기명 캐시가 있으면 title에 반영."""
     try:
@@ -761,12 +809,14 @@ class ModuleMain(PluginModuleBase):
             "channel_list_updated_at": "",
             "library_path": "",
             "stream_base_url": "",
+            "plex_section_id": "",
         }
         # db_default는 최초 설치 시에만 동작 → 업그레이드 시 누락 키 보완
         # ModelSetting.set()은 UPDATE만 하므로 없는 키에는 raw INSERT OR IGNORE 필요
         _migration_keys = [
             ("library_path", ""),
             ("stream_base_url", ""),
+            ("plex_section_id", ""),
             ("channel_list_cache", ""),
             ("channel_list_updated_at", ""),
         ]
@@ -824,6 +874,8 @@ class ModuleMain(PluginModuleBase):
             ok, msg = _write_show_yaml()
             if ok:
                 logger.info("[SOOP_KBO][SCHED] show.yaml 갱신: %s", msg)
+                rok, rmsg = _trigger_plex_refresh()
+                logger.info("[SOOP_KBO][SCHED] Plex refresh: ok=%s %s", rok, rmsg)
             else:
                 logger.debug("[SOOP_KBO][SCHED] show.yaml 미생성: %s", msg)
         except Exception:
@@ -886,6 +938,10 @@ class ModuleMain(PluginModuleBase):
 @blueprint.route("/ajax/write_show_yaml", methods=["POST"])
 def soop_kbo_ajax_write_show_yaml():
     ok, msg = _write_show_yaml()
+    if ok:
+        rok, rmsg = _trigger_plex_refresh()
+        logger.info("[SOOP_KBO] Plex refresh: ok=%s %s", rok, rmsg)
+        msg = f"{msg} | Plex: {rmsg}"
     return jsonify({"ok": ok, "msg": msg})
 
 
