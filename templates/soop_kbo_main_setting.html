@@ -25,6 +25,12 @@
         {{ macros.m_hr() }}
 
         {{ macros.setting_button_with_info([['cacheClearBtn', '캐시 초기화']], left='스트림 캐시', desc=['스트림이 끊겼을 때 초기화하세요 (TTL: 30분)']) }}
+
+        {{ macros.m_hr() }}
+
+        {{ macros.setting_input_text('library_path', 'Plex 라이브러리 위치', value=arg['library_path'], desc=['show.yaml을 생성할 폴더 경로', '예) /mnt/PlexLiveTV']) }}
+        {{ macros.setting_input_text('stream_base_url', '스트림 베이스 URL', value=arg['stream_base_url'], desc=['채널 URL 앞부분 (끝 / 제외)', '예) https://ff.example.com']) }}
+        {{ macros.setting_button_with_info([['showYamlBtn', 'show.yaml 생성']], left='Plex 연동', desc=['kbo/show.yaml을 라이브러리 폴더에 생성합니다', '설정 저장 시 및 스케줄러 실행 시 자동 갱신됩니다']) }}
       {{ macros.m_tab_content_end() }}
 
       {{ macros.m_tab_content_start('auto', false) }}
@@ -54,6 +60,28 @@
         } else {
           $.notify('<strong>설정 저장에 실패하였습니다.</strong>', { type: 'warning' });
         }
+      }
+    });
+  });
+
+  $("body").on('click', '#showYamlBtn', function (e) {
+    e.preventDefault();
+    var $btn = $(this);
+    $btn.prop('disabled', true).text('생성중...');
+    $.ajax({
+      url: `/${PACKAGE_NAME}/ajax/write_show_yaml`,
+      type: "POST",
+      cache: false,
+      dataType: "json",
+      success: function (ret) {
+        if (ret.ok) {
+          $.notify('<strong>show.yaml 생성 완료:</strong> ' + ret.msg, { type: 'success' });
+        } else {
+          $.notify('<strong>show.yaml 생성 실패:</strong> ' + ret.msg, { type: 'warning' });
+        }
+      },
+      complete: function () {
+        $btn.prop('disabled', false).text('show.yaml 생성');
       }
     });
   });
