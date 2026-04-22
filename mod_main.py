@@ -668,6 +668,85 @@ def _trigger_plex_refresh() -> tuple[bool, str]:
         return False, f"Plex refresh 예외: {e}"
 
 
+def _update_alive_yaml() -> tuple[bool, str]:
+    """alive.yaml의 kboglobal1~5 name 필드를 채널 캐시 경기명으로 업데이트."""
+    enable = (ModelSetting.get("alive_update_enable") or "False").strip().lower() in ("true", "1", "on", "yes")
+    if not enable:
+        return False, "alive 연동 비활성화"
+
+    alive_path = (ModelSetting.get("alive_yaml_path") or "").strip()
+    if not alive_path:
+        logger.info("[SOOP_KBO] alive_yaml_path 미설정 - alive.yaml 업데이트 건너뜀")
+        return False, "alive_yaml_path 미설정"
+
+    path = Path(alive_path)
+    if not path.exists():
+        logger.info("[SOOP_KBO] alive.yaml 파일 없음: %s", alive_path)
+        return False, f"파일 없음: {alive_path}"
+
+    title_map: dict[str, str] = {}
+    try:
+        raw = ModelSetting.get("channel_list_cache") or ""
+        if raw:
+            for row in json.loads(raw):
+                ch_id = row.get("channel_id", "")
+                title = row.get("program", {}).get("title", "")
+                if ch_id and title and "대기중" not in title:
+                    title_map[ch_id] = title
+    except Exception:
+        logger.exception("[SOOP_KBO] alive title_map 구성 실패")
+
+    default_names = {f"kboglobal{i}": f"[SOOP] KBO CH.{i} (대기중)" for i in range(1, 6)}
+
+    content = path.read_text(encoding="utf-8")
+    lines = content.splitlines(keepends=True)
+    new_lines = []
+    current_channel: str | None = None
+    channel_indent = 0
+    changed = 0
+
+    for line in lines:
+        rstripped = line.rstrip('\r\n')
+        eol = line[len(rstripped):]
+
+        m = re.match(r'^(\s+)(kboglobal[1-5]):\s*$', rstripped)
+        if m:
+            current_channel = m.group(2)
+            channel_indent = len(m.group(1))
+            new_lines.append(line)
+            continue
+
+        if current_channel:
+            line_stripped = rstripped.lstrip()
+            line_indent = len(rstripped) - len(line_stripped) if line_stripped else channel_indent + 1
+            if line_stripped and line_indent <= channel_indent:
+                current_channel = None
+                channel_indent = 0
+            elif re.match(r'^\s+name:\s*', rstripped):
+                new_name = title_map.get(current_channel, default_names.get(current_channel, current_channel))
+                indent_m = re.match(r'^(\s+)', rstripped)
+                indent = indent_m.group(1) if indent_m else "      "
+                escaped = new_name.replace("'", "''")
+                new_line = f"{indent}name: '{escaped}'{eol}"
+                if new_line != line:
+                    changed += 1
+                new_lines.append(new_line)
+                current_channel = None
+                channel_indent = 0
+                continue
+
+        new_lines.append(line)
+
+    new_content = "".join(new_lines)
+    if new_content == content:
+        logger.info("[SOOP_KBO] alive.yaml 변경 없음")
+        return True, "변경 없음"
+
+    path.write_text(new_content, encoding="utf-8")
+    logger.info("[SOOP_KBO] alive.yaml 업데이트: %d개 채널명 변경", changed)
+    return True, f"{changed}개 채널명 업데이트"
+
+
 def _write_show_yaml() -> tuple[bool, str]:
     """library_path/kbo/show.yaml 생성. 경기명 캐시가 있으면 title에 반영."""
     try:
@@ -692,6 +771,7 @@ def _write_show_yaml() -> tuple[bool, str]:
         msg = f"미설정 항목: {', '.join(missing)}"
         logger.info("[SOOP_KBO] show.yaml 건너뜀 - %s", msg)
         return False, msg
+
 
     # 캐시에서 채널별 경기명 가져오기 (없으면 기본값 사용)
     title_map: dict[str, str] = {}
@@ -819,6 +899,8 @@ class ModuleMain(PluginModuleBase):
             "library_path": "",
             "stream_base_url": "",
             "plex_section_id": "",
+            "alive_update_enable": "False",
+            "alive_yaml_path": "",
         }
         # db_default는 최초 설치 시에만 동작 → 업그레이드 시 누락 키 보완
         # ModelSetting.set()은 UPDATE만 하므로 없는 키에는 raw INSERT OR IGNORE 필요
@@ -828,6 +910,8 @@ class ModuleMain(PluginModuleBase):
             ("plex_section_id", ""),
             ("channel_list_cache", ""),
             ("channel_list_updated_at", ""),
+            ("alive_update_enable", "False"),
+            ("alive_yaml_path", ""),
         ]
         try:
             _app = getattr(F, 'app', None)
@@ -887,6 +971,9 @@ class ModuleMain(PluginModuleBase):
                 logger.info("[SOOP_KBO][SCHED] Plex refresh: ok=%s %s", rok, rmsg)
             else:
                 logger.info("[SOOP_KBO][SCHED] show.yaml 건너뜀: %s", msg)
+            # alive.yaml 채널명 업데이트
+            aok, amsg = _update_alive_yaml()
+            logger.info("[SOOP_KBO][SCHED] alive.yaml: ok=%s %s", aok, amsg)
         except Exception:
             logger.exception("[SOOP_KBO][SCHED] 실행 오류")
             ModelSetting.set("schedule_last_result", "error")
@@ -973,6 +1060,10 @@ def soop_kbo_ajax_write_show_yaml():
         rok, rmsg = _trigger_plex_refresh()
         logger.info("[SOOP_KBO] Plex refresh: ok=%s %s", rok, rmsg)
         msg = f"{msg} | Plex: {rmsg}"
+    aok, amsg = _update_alive_yaml()
+    logger.info("[SOOP_KBO] alive.yaml: ok=%s %s", aok, amsg)
+    if aok:
+        msg = f"{msg} | alive: {amsg}"
     return jsonify({"ok": ok, "msg": msg})
 
 
