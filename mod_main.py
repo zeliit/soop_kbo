@@ -669,7 +669,7 @@ def _trigger_plex_refresh() -> tuple[bool, str]:
 
 
 def _update_alive_yaml() -> tuple[bool, str]:
-    """alive.yaml의 kboglobal1~5 name 필드를 채널 캐시 경기명으로 업데이트."""
+    """alive.yaml의 kboglobal1~5 name 필드를 채널 캐시 경기명으로 업데이트. 없으면 fix_url에 추가."""
     enable = (ModelSetting.get("alive_update_enable") or "False").strip().lower() in ("true", "1", "on", "yes")
     if not enable:
         return False, "alive 연동 비활성화"
@@ -697,15 +697,18 @@ def _update_alive_yaml() -> tuple[bool, str]:
         logger.exception("[SOOP_KBO] alive title_map 구성 실패")
 
     default_names = {f"kboglobal{i}": f"[SOOP] KBO CH.{i} (대기중)" for i in range(1, 6)}
+    target_channels = list(default_names.keys())
 
     content = path.read_text(encoding="utf-8")
-    lines = content.splitlines(keepends=True)
-    new_lines = []
+    new_lines = list(content.splitlines(keepends=True))
+
+    # ── Phase 1: 기존 name 필드 업데이트 ──────────────────────────────────────
     current_channel: str | None = None
     channel_indent = 0
-    changed = 0
+    found_channels: set[str] = set()
+    updated = 0
 
-    for line in lines:
+    for i, line in enumerate(new_lines):
         rstripped = line.rstrip('\r\n')
         eol = line[len(rstripped):]
 
@@ -713,29 +716,76 @@ def _update_alive_yaml() -> tuple[bool, str]:
         if m:
             current_channel = m.group(2)
             channel_indent = len(m.group(1))
-            new_lines.append(line)
+            found_channels.add(current_channel)
             continue
 
         if current_channel:
-            line_stripped = rstripped.lstrip()
-            line_indent = len(rstripped) - len(line_stripped) if line_stripped else channel_indent + 1
-            if line_stripped and line_indent <= channel_indent:
+            ls = rstripped.lstrip()
+            li = len(rstripped) - len(ls) if ls else channel_indent + 1
+            if ls and li <= channel_indent:
                 current_channel = None
                 channel_indent = 0
             elif re.match(r'^\s+name:\s*', rstripped):
-                new_name = title_map.get(current_channel, default_names.get(current_channel, current_channel))
+                new_name = title_map.get(current_channel, default_names[current_channel])
                 indent_m = re.match(r'^(\s+)', rstripped)
                 indent = indent_m.group(1) if indent_m else "      "
                 escaped = new_name.replace("'", "''")
                 new_line = f"{indent}name: '{escaped}'{eol}"
                 if new_line != line:
-                    changed += 1
-                new_lines.append(new_line)
+                    new_lines[i] = new_line
+                    updated += 1
                 current_channel = None
                 channel_indent = 0
-                continue
 
-        new_lines.append(line)
+    # ── Phase 2: 없는 채널 fix_url 섹션에 추가 ───────────────────────────────
+    missing = [ch for ch in target_channels if ch not in found_channels]
+    added = 0
+
+    if missing:
+        stream_base_url = (ModelSetting.get("stream_base_url") or "").strip().rstrip("/")
+        fix_url_indent = -1
+        entry_indent = -1
+        last_fix_url_idx = -1
+        in_fix_url = False
+
+        for i, line in enumerate(new_lines):
+            rstripped = line.rstrip('\r\n')
+            stripped = rstripped.strip()
+            m = re.match(r'^(\s*)fix_url:\s*$', rstripped)
+            if m:
+                in_fix_url = True
+                fix_url_indent = len(m.group(1))
+                continue
+            if in_fix_url:
+                if not stripped or stripped.startswith('#'):
+                    continue
+                li = len(rstripped) - len(rstripped.lstrip())
+                if li <= fix_url_indent:
+                    in_fix_url = False
+                else:
+                    last_fix_url_idx = i
+                    if entry_indent < 0:
+                        entry_indent = li
+
+        if last_fix_url_idx >= 0:
+            if entry_indent < 0:
+                entry_indent = fix_url_indent + 2
+            e_ind = " " * entry_indent
+            p_ind = " " * (entry_indent + 2)
+            insert_lines = []
+            for ch_id in missing:
+                new_name = title_map.get(ch_id, default_names[ch_id])
+                escaped = new_name.replace("'", "''")
+                url = f"{stream_base_url}/soop_kbo/channel/{ch_id}.m3u8" if stream_base_url else ""
+                insert_lines.append(f"{e_ind}{ch_id}:\n")
+                insert_lines.append(f"{p_ind}name: '{escaped}'\n")
+                if url:
+                    insert_lines.append(f"{p_ind}url: {url}\n")
+            new_lines = new_lines[:last_fix_url_idx + 1] + insert_lines + new_lines[last_fix_url_idx + 1:]
+            added = len(missing)
+            logger.info("[SOOP_KBO] alive.yaml 새 항목 추가: %s", missing)
+        else:
+            logger.warning("[SOOP_KBO] alive.yaml fix_url 섹션을 찾을 수 없어 추가 건너뜀")
 
     new_content = "".join(new_lines)
     if new_content == content:
@@ -743,8 +793,14 @@ def _update_alive_yaml() -> tuple[bool, str]:
         return True, "변경 없음"
 
     path.write_text(new_content, encoding="utf-8")
-    logger.info("[SOOP_KBO] alive.yaml 업데이트: %d개 채널명 변경", changed)
-    return True, f"{changed}개 채널명 업데이트"
+    msg_parts = []
+    if updated:
+        msg_parts.append(f"업데이트 {updated}개")
+    if added:
+        msg_parts.append(f"추가 {added}개")
+    msg = ", ".join(msg_parts) or "변경 없음"
+    logger.info("[SOOP_KBO] alive.yaml %s", msg)
+    return True, msg
 
 
 def _write_show_yaml() -> tuple[bool, str]:
