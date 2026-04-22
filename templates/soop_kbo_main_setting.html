@@ -42,7 +42,7 @@
 
       {{ macros.m_tab_content_start('alive', false) }}
       {{ macros.setting_checkbox('alive_update_enable', 'ALIVE 연동', value=arg['alive_update_enable'], desc='On: 스케줄러/show.yaml 생성 시 alive.yaml 경기명 자동 업데이트') }}
-      {{ macros.setting_input_text('alive_yaml_path', 'alive.yaml 경로', value=arg['alive_yaml_path'], desc=['alive.yaml 파일의 절대 경로', '예) /data/plugins/alive/alive.yaml']) }}
+      {{ macros.setting_input_text('alive_yaml_path', 'alive.yaml 경로', value=arg['alive_yaml_path'], desc=['alive.yaml 파일의 절대 경로', '예) /data/db/alive.yaml']) }}
       {{ macros.m_tab_content_end() }}
 
       {{ macros.m_tab_content_start('auto', false) }}
