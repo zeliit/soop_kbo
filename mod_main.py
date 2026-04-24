@@ -994,6 +994,7 @@ class ModuleMain(PluginModuleBase):
             arg["package_name"] = P.package_name
             arg["plugin_version"] = PLUGIN_VERSION
             arg["playlist_url"] = f"{SystemModelSetting.get('ddns')}/{P.package_name}/playlist.m3u8"
+            arg["yaml_url"] = f"{SystemModelSetting.get('ddns')}/{P.package_name}/api/yaml"
             arg["default_channel_urls"] = json.dumps(DEFAULT_CHANNEL_URLS, ensure_ascii=False, indent=2)
             if sub == "setting":
                 arg["is_include"] = scheduler.is_include(self.get_scheduler_name())
@@ -1121,6 +1122,51 @@ def soop_kbo_ajax_write_show_yaml():
     if aok:
         msg = f"{msg} | alive: {amsg}"
     return jsonify({"ok": ok, "msg": msg})
+
+
+@blueprint.route("/api/yaml")
+def soop_kbo_api_yaml():
+    try:
+        import yaml as _yaml
+    except ImportError:
+        abort(500)
+    from datetime import datetime
+    stream_base_url = (ModelSetting.get("stream_base_url") or "").strip().rstrip("/")
+    if not stream_base_url:
+        stream_base_url = SystemModelSetting.get("ddns").rstrip("/")
+    title_map: dict[str, str] = {}
+    try:
+        raw = ModelSetting.get("channel_list_cache") or ""
+        if raw:
+            for row in json.loads(raw):
+                ch_id = row.get("channel_id", "")
+                title = row.get("program", {}).get("title", "")
+                if ch_id and title and "대기중" not in title:
+                    title_map[ch_id] = title
+    except Exception:
+        logger.exception("[SOOP_KBO] api/yaml title_map 구성 실패")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    extras = []
+    for i in range(1, 6):
+        ch_id = f"kboglobal{i}"
+        title = title_map.get(ch_id, f"SOOP KBO{i}")
+        extras.append({
+            "mode": "m3u8",
+            "type": "featurette",
+            "param": f"{stream_base_url}/soop_kbo/channel/{ch_id}.m3u8",
+            "title": title,
+            "thumb": f"https://raw.githubusercontent.com/zeliit/PlexLiveTV/main/thumb/soop_kbo{i}.png",
+        })
+    show = {
+        "primary": True,
+        "code": "kbo",
+        "title": "숲 한국 프로야구",
+        "posters": "https://raw.githubusercontent.com/zeliit/PlexLiveTV/main/poster/kbo.webp",
+        "summary": f"SOOP KBO 채널\n\n  {now}",
+        "extras": extras,
+    }
+    content = _yaml.safe_dump(show, allow_unicode=True, sort_keys=False)
+    return Response(content, content_type="text/plain; charset=utf-8")
 
 
 @blueprint.route("/ajax/channel_list_refresh", methods=["POST"])

@@ -27,6 +27,8 @@
 
       {{ macros.info_text_go_buttons('playlist_url', '플레이리스트', [['globalCliboardBtn','클립보드에 복사', [['text',
       arg['playlist_url']]]]], value=arg['playlist_url'], desc=['IPTV 플레이어에 입력하세요']) }}
+      {{ macros.info_text_go_buttons('yaml_url', 'YAML', [['globalCliboardBtn','클립보드에 복사', [['text',
+      arg['yaml_url']]]]], value=arg['yaml_url'], desc=['Plex 라이브러리 연동용 YAML']) }}
       {{ macros.m_tab_content_end() }}
 
       {{ macros.m_tab_content_start('plex', false) }}
