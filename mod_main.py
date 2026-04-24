@@ -668,6 +668,14 @@ def _trigger_plex_refresh() -> tuple[bool, str]:
         return False, f"Plex refresh 예외: {e}"
 
 
+def _channel_display_title(ch_id: str, title_map: dict[str, str]) -> str:
+    """채널 표시 제목 통일 포맷: [SOOP] KBO CH.{i} {경기명} 또는 [SOOP] KBO CH.{i} (대기중)"""
+    i = ch_id[-1]
+    prefix = f"[SOOP] KBO CH.{i}"
+    title = title_map.get(ch_id, "")
+    return f"{prefix} {title}" if title else f"{prefix} (대기중)"
+
+
 def _update_alive_yaml() -> tuple[bool, str]:
     """alive.yaml의 kboglobal1~5 name 필드를 채널 캐시 경기명으로 업데이트. 없으면 fix_url에 추가."""
     enable = (ModelSetting.get("alive_update_enable") or "False").strip().lower() in ("true", "1", "on", "yes")
@@ -726,7 +734,7 @@ def _update_alive_yaml() -> tuple[bool, str]:
                 current_channel = None
                 channel_indent = 0
             elif re.match(r'^\s+name:\s*', rstripped):
-                new_name = title_map.get(current_channel, default_names[current_channel])
+                new_name = _channel_display_title(current_channel, title_map)
                 indent_m = re.match(r'^(\s+)', rstripped)
                 indent = indent_m.group(1) if indent_m else "      "
                 escaped = new_name.replace("'", "''")
@@ -774,7 +782,7 @@ def _update_alive_yaml() -> tuple[bool, str]:
             p_ind = " " * (entry_indent + 2)
             insert_lines = []
             for ch_id in missing:
-                new_name = title_map.get(ch_id, default_names[ch_id])
+                new_name = _channel_display_title(ch_id, title_map)
                 escaped = new_name.replace("'", "''")
                 url = f"{stream_base_url}/soop_kbo/channel/{ch_id}.m3u8" if stream_base_url else ""
                 insert_lines.append(f"{e_ind}{ch_id}:\n")
@@ -846,7 +854,7 @@ def _write_show_yaml() -> tuple[bool, str]:
     extras = []
     for i in range(1, 6):
         ch_id = f"kboglobal{i}"
-        title = title_map.get(ch_id, f"SOOP KBO{i}")
+        title = _channel_display_title(ch_id, title_map)
         extras.append({
             "mode": "m3u8",
             "type": "featurette",
@@ -1149,7 +1157,7 @@ def soop_kbo_api_yaml():
     extras = []
     for i in range(1, 6):
         ch_id = f"kboglobal{i}"
-        title = title_map.get(ch_id, f"SOOP KBO{i}")
+        title = _channel_display_title(ch_id, title_map)
         extras.append({
             "mode": "m3u8",
             "type": "featurette",
