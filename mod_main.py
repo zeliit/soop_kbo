@@ -669,11 +669,13 @@ def _trigger_plex_refresh() -> tuple[bool, str]:
 
 
 def _channel_display_title(ch_id: str, title_map: dict[str, str]) -> str:
-    """채널 표시 제목 통일 포맷: [SOOP] KBO CH.{i} {경기명} 또는 [SOOP] KBO CH.{i} (대기중)"""
+    """채널 표시 제목 통일 포맷: [SOOP KBO CH.{i}] {경기명} 또는 [SOOP KBO CH.{i}] 대기중"""
     i = ch_id[-1]
-    prefix = f"[SOOP] KBO CH.{i}"
+    prefix = f"[SOOP KBO CH.{i}]"
     title = title_map.get(ch_id, "")
-    return f"{prefix} {title}" if title else f"{prefix} (대기중)"
+    if title:
+        title = re.sub(r'^\[KBO\]\s*', '', title).strip()
+    return f"{prefix} {title}" if title else f"{prefix} 대기중"
 
 
 def _update_alive_yaml() -> tuple[bool, str]:
