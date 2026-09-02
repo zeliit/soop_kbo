@@ -797,42 +797,35 @@ def _update_alive_yaml() -> tuple[bool, str]:
         else:
             logger.warning("[SOOP_KBO] alive.yaml fix_url 섹션을 찾을 수 없어 추가 건너뜀")
 
-    # Phase 3: normalize SOOP KBO blocks for Alive.
+    # Phase 3: normalize SOOP KBO block order only; preserve each block URL.
+    kbo_blocks = {}
     kbo_starts = []
     for idx, line in enumerate(new_lines):
         m = re.match(r'^(\s+)(kboglobal[1-5]):\s*$', line.rstrip('\r\n'))
         if m:
-            kbo_starts.append((idx, len(m.group(1))))
+            kbo_starts.append((idx, len(m.group(1)), m.group(2)))
     if kbo_starts:
         first_idx = kbo_starts[0][0]
-        entry_indent = kbo_starts[0][1]
         ranges = []
-        for start_idx, indent_len in kbo_starts:
+        for start_idx, indent_len, ch_id in kbo_starts:
             end_idx = start_idx + 1
             while end_idx < len(new_lines):
                 raw_line = new_lines[end_idx].rstrip('\r\n')
-                stripped = raw_line.strip()
-                if stripped:
+                if raw_line.strip():
                     line_indent = len(raw_line) - len(raw_line.lstrip())
                     if line_indent <= indent_len:
                         break
                 end_idx += 1
+            kbo_blocks[ch_id] = new_lines[start_idx:end_idx]
             ranges.append((start_idx, end_idx))
         for start_idx, end_idx in reversed(ranges):
             del new_lines[start_idx:end_idx]
-        stream_base_url = (ModelSetting.get("stream_base_url") or "").strip().rstrip("/")
-        e_ind = " " * entry_indent
-        p_ind = " " * (entry_indent + 2)
-        canonical = []
+        ordered_blocks = []
         for ch_no in range(1, 6):
             ch_id = f"kboglobal{ch_no}"
-            new_name = _channel_display_title(ch_id, title_map)
-            escaped = new_name.replace("'", "''")
-            canonical.append(f"{e_ind}{ch_id}:\n")
-            canonical.append(f"{p_ind}name: '{escaped}'\n")
-            if stream_base_url:
-                canonical.append(f"{p_ind}url: {stream_base_url}/soop_kbo/channel/{ch_id}.m3u8\n")
-        new_lines[first_idx:first_idx] = canonical
+            if ch_id in kbo_blocks:
+                ordered_blocks.extend(kbo_blocks[ch_id])
+        new_lines[first_idx:first_idx] = ordered_blocks
     new_content = "".join(new_lines)
     if new_content == content:
         logger.info("[SOOP_KBO] alive.yaml 변경 없음")

@@ -1,5 +1,5 @@
 title: "SOOP KBO"
-version: "1.0.40"
+version: "1.0.41"
 package_name: "soop_kbo"
 developer: "zeliit"
 description: "SOOP KBO HLS 프록시 플러그인"
