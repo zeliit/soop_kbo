@@ -40,6 +40,10 @@ scheduler = F.scheduler
 PLUGIN_VERSION = "unknown"
 
 
+class ChannelUnavailableError(RuntimeError):
+    """Expected when a configured SOOP channel is currently off-air."""
+
+
 def _load_plugin_version() -> str:
     """info.yaml에서 버전을 읽어 UI/로그에 노출."""
     try:
@@ -333,7 +337,8 @@ def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
         message = data.get("message") or data.get("MSG")
         if isinstance(channel, dict):
             message = message or channel.get("RESULT_MSG") or channel.get("ERROR")
-        raise RuntimeError(
+        error_type = ChannelUnavailableError if str(result_code) == "0" else RuntimeError
+        raise error_type(
             f"SOOP API result={result_code}: 방송 중이 아니거나 오류 ({bj_id}) "
             f"message={message}"
         )
@@ -1279,6 +1284,11 @@ def soop_kbo_channel(channel_id: str):
         resp = sess.get(hls_url, timeout=15)
         resp.raise_for_status()
         return Response(_rewrite_m3u8(resp.text, hls_url, channel_id), content_type="application/vnd.apple.mpegurl")
+    except ChannelUnavailableError as e:
+        logger.info("[SOOP_KBO] 채널 오프라인: %s (%s)", channel_id, e)
+        with _cache_lock:
+            _cache.pop(channel_id, None)
+        abort(503)
     except Exception:
         logger.exception("[SOOP_KBO] 채널 오류: %s", channel_id)
         with _cache_lock:
