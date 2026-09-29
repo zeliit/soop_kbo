@@ -18,6 +18,7 @@ streamlink 없이 SOOP API를 직접 호출합니다.
 import json
 import os
 import re
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1014,21 +1015,21 @@ class ModuleMain(PluginModuleBase):
             ("alive_yaml_path", ""),
         ]
         try:
-            _app = getattr(F, 'app', None)
-            if _app:
-                with _app.app_context():
-                    _conn = F.db.engine.raw_connection()
-                    try:
-                        _cur = _conn.cursor()
-                        for _key, _default in _migration_keys:
-                            _cur.execute(
-                                f'INSERT OR IGNORE INTO {package_name}_setting ("key", value) VALUES (?, ?)',
-                                (_key, _default),
-                            )
-                            logger.debug("[SOOP_KBO] DB키 마이그레이션: %s", _key)
-                        _conn.commit()
-                    finally:
-                        _conn.close()
+            _db_path = Path(F.config["path_data"]) / "db" / f"{package_name}.db"
+            with sqlite3.connect(_db_path) as _conn:
+                _cur = _conn.cursor()
+                _table_name = f"{package_name}_setting"
+                _cur.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (_table_name,),
+                )
+                if _cur.fetchone() is not None:
+                    for _key, _default in _migration_keys:
+                        _cur.execute(
+                            f'INSERT OR IGNORE INTO {_table_name} ("key", value) VALUES (?, ?)',
+                            (_key, _default),
+                        )
+                        logger.debug("[SOOP_KBO] DB키 마이그레이션: %s", _key)
         except Exception:
             logger.exception("[SOOP_KBO] DB키 마이그레이션 실패")
 
