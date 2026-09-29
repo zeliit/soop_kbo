@@ -8,7 +8,7 @@ streamlink 없이 SOOP API를 직접 호출합니다.
   /soop_kbo/playlist.m3u8          - Plex / IPTV 플레이리스트
   /soop_kbo/channel/<id>.m3u8      - 채널 HLS 프록시
   /soop_kbo/sub                    - 서브 플레이리스트 프록시
-  /soop_kbo/seg                    - 세그먼트 프록시
+  /soop_kbo/seg.ts                 - MPEG-TS 세그먼트 프록시
   /soop_kbo/cache/clear            - 스트림 캐시 초기화
 
 [ 설정 ]
@@ -949,7 +949,7 @@ def _proxy_base() -> str:
 
 
 def _rewrite_m3u8(m3u8_text: str, m3u8_url: str, channel_id: str) -> str:
-    """m3u8 내 URL을 /soop_kbo/seg, /soop_kbo/sub 엔드포인트로 재작성."""
+    """m3u8 내 URL을 /soop_kbo/seg.ts, /soop_kbo/sub 엔드포인트로 재작성."""
     base = _base_url_of(m3u8_url)
     pb = _proxy_base()
 
@@ -958,7 +958,9 @@ def _rewrite_m3u8(m3u8_text: str, m3u8_url: str, channel_id: str) -> str:
         return u if u.startswith("http") else urljoin(base, u)
 
     def to_seg(u: str) -> str:
-        return f"{pb}/seg?c={channel_id}&url={_b64enc(abs_url(u))}"
+        # FFmpeg의 HLS demuxer는 응답이 MPEG-TS여도 확장자 없는
+        # 세그먼트 경로를 거부할 수 있으므로 프록시 URL에 확장자를 유지한다.
+        return f"{pb}/seg.ts?c={channel_id}&url={_b64enc(abs_url(u))}"
 
     def to_sub(u: str) -> str:
         return f"{pb}/sub?c={channel_id}&url={_b64enc(abs_url(u))}"
@@ -1313,6 +1315,7 @@ def soop_kbo_sub():
 
 
 @blueprint.route("/seg")
+@blueprint.route("/seg.ts")
 def soop_kbo_seg():
     channel_id = request.args.get("c", "")
     encoded = request.args.get("url", "")
