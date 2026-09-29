@@ -18,6 +18,7 @@ streamlink 없이 SOOP API를 직접 호출합니다.
 import json
 import os
 import re
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -38,6 +39,10 @@ blueprint = P.blueprint
 SystemModelSetting = F.SystemModelSetting
 scheduler = F.scheduler
 PLUGIN_VERSION = "unknown"
+
+
+class ChannelUnavailableError(RuntimeError):
+    """Expected when a configured SOOP channel is currently off-air."""
 
 
 def _load_plugin_version() -> str:
@@ -333,7 +338,8 @@ def _get_hls_url_from_api(page_url: str, sess: requests.Session) -> str:
         message = data.get("message") or data.get("MSG")
         if isinstance(channel, dict):
             message = message or channel.get("RESULT_MSG") or channel.get("ERROR")
-        raise RuntimeError(
+        error_type = ChannelUnavailableError if str(result_code) == "0" else RuntimeError
+        raise error_type(
             f"SOOP API result={result_code}: 방송 중이 아니거나 오류 ({bj_id}) "
             f"message={message}"
         )
@@ -1009,21 +1015,21 @@ class ModuleMain(PluginModuleBase):
             ("alive_yaml_path", ""),
         ]
         try:
-            _app = getattr(F, 'app', None)
-            if _app:
-                with _app.app_context():
-                    _conn = F.db.engine.raw_connection()
-                    try:
-                        _cur = _conn.cursor()
-                        for _key, _default in _migration_keys:
-                            _cur.execute(
-                                f'INSERT OR IGNORE INTO {package_name}_setting ("key", value) VALUES (?, ?)',
-                                (_key, _default),
-                            )
-                            logger.debug("[SOOP_KBO] DB키 마이그레이션: %s", _key)
-                        _conn.commit()
-                    finally:
-                        _conn.close()
+            _db_path = Path(F.config["path_data"]) / "db" / f"{package_name}.db"
+            with sqlite3.connect(_db_path) as _conn:
+                _cur = _conn.cursor()
+                _table_name = f"{package_name}_setting"
+                _cur.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (_table_name,),
+                )
+                if _cur.fetchone() is not None:
+                    for _key, _default in _migration_keys:
+                        _cur.execute(
+                            f'INSERT OR IGNORE INTO {_table_name} ("key", value) VALUES (?, ?)',
+                            (_key, _default),
+                        )
+                        logger.debug("[SOOP_KBO] DB키 마이그레이션: %s", _key)
         except Exception:
             logger.exception("[SOOP_KBO] DB키 마이그레이션 실패")
 
@@ -1279,6 +1285,11 @@ def soop_kbo_channel(channel_id: str):
         resp = sess.get(hls_url, timeout=15)
         resp.raise_for_status()
         return Response(_rewrite_m3u8(resp.text, hls_url, channel_id), content_type="application/vnd.apple.mpegurl")
+    except ChannelUnavailableError as e:
+        logger.info("[SOOP_KBO] 채널 오프라인: %s (%s)", channel_id, e)
+        with _cache_lock:
+            _cache.pop(channel_id, None)
+        abort(503)
     except Exception:
         logger.exception("[SOOP_KBO] 채널 오류: %s", channel_id)
         with _cache_lock:
