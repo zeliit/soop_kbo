@@ -1031,7 +1031,7 @@ class ModuleMain(PluginModuleBase):
             "stream_base_url": "",
             "plex_section_id": "",
             "alive_update_enable": "False",
-            "alive_only_onair": "False",
+            "alive_only_onair": "True",
             "alive_yaml_path": "",
         }
         # db_default는 최초 설치 시에만 동작 → 업그레이드 시 누락 키 보완
@@ -1043,7 +1043,7 @@ class ModuleMain(PluginModuleBase):
             ("channel_list_cache", ""),
             ("channel_list_updated_at", ""),
             ("alive_update_enable", "False"),
-            ("alive_only_onair", "False"),
+            ("alive_only_onair", "True"),
             ("alive_yaml_path", ""),
         ]
         try:
