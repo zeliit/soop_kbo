@@ -558,6 +558,7 @@ def _refresh_channel_titles(log_prefix: str = "WEB") -> tuple[list[dict], str]:
             "source": "soop_kbo",
             "channel_id": ch["id"],
             "name": ch["name"],
+            "onair": bool(meta.get("onair")),
             "program": {"title": title},
         }
 
@@ -574,6 +575,7 @@ def _refresh_channel_titles(log_prefix: str = "WEB") -> tuple[list[dict], str]:
                         "source": "soop_kbo",
                         "channel_id": ch["id"],
                         "name": ch["name"],
+                        "onair": False,
                         "program": {"title": "경기 대기중입니다"},
                     }
                 )
@@ -695,6 +697,7 @@ def _update_alive_yaml() -> tuple[bool, str]:
         return False, f"파일 없음: {alive_path}"
 
     title_map: dict[str, str] = {}
+    onair_channels: set[str] = set()
     try:
         raw = ModelSetting.get("channel_list_cache") or ""
         if raw:
@@ -703,11 +706,19 @@ def _update_alive_yaml() -> tuple[bool, str]:
                 title = row.get("program", {}).get("title", "")
                 if ch_id and title and "대기중" not in title:
                     title_map[ch_id] = title
+                if ch_id and row.get("onair") is True:
+                    onair_channels.add(ch_id)
     except Exception:
-        logger.exception("[SOOP_KBO] alive title_map 구성 실패")
+        logger.exception("[SOOP_KBO] alive title_map/onair 구성 실패")
 
     default_names = {f"kboglobal{i}": f"[SOOP] KBO CH.{i} (대기중)" for i in range(1, 6)}
-    target_channels = list(default_names.keys())
+    channel_order = [ch["id"] for ch in _channel_list() if ch["id"] in default_names]
+    for ch_id in default_names:
+        if ch_id not in channel_order:
+            channel_order.append(ch_id)
+
+    only_onair = (ModelSetting.get("alive_only_onair") or "False").strip().lower() in ("true", "1", "on", "yes")
+    target_channels = [ch_id for ch_id in channel_order if (not only_onair or ch_id in onair_channels)]
 
     content = path.read_text(encoding="utf-8")
     new_lines = list(content.splitlines(keepends=True))
@@ -747,7 +758,31 @@ def _update_alive_yaml() -> tuple[bool, str]:
                 current_channel = None
                 channel_indent = 0
 
-    # ── Phase 2: 없는 채널 fix_url 섹션에 추가 ───────────────────────────────
+    # ── Phase 2: 경기 없는 채널 제거 + 필요한 채널 fix_url 섹션에 추가 ───────
+    removed = 0
+    if only_onair:
+        remove_ranges = []
+        for idx, line in enumerate(new_lines):
+            match = re.match(r'^(\s+)(kboglobal[1-5]):\s*$', line.rstrip('\r\n'))
+            if not match or match.group(2) in target_channels:
+                continue
+            indent_len = len(match.group(1))
+            end_idx = idx + 1
+            while end_idx < len(new_lines):
+                raw_line = new_lines[end_idx].rstrip('\r\n')
+                if raw_line.strip():
+                    line_indent = len(raw_line) - len(raw_line.lstrip())
+                    if line_indent <= indent_len:
+                        break
+                end_idx += 1
+            remove_ranges.append((idx, end_idx, match.group(2)))
+        for start_idx, end_idx, ch_id in reversed(remove_ranges):
+            del new_lines[start_idx:end_idx]
+            found_channels.discard(ch_id)
+            removed += 1
+        if removed:
+            logger.info("[SOOP_KBO] alive.yaml 비방송 채널 제거: %d개", removed)
+
     missing = [ch for ch in target_channels if ch not in found_channels]
     added = 0
 
@@ -821,8 +856,7 @@ def _update_alive_yaml() -> tuple[bool, str]:
         for start_idx, end_idx in reversed(ranges):
             del new_lines[start_idx:end_idx]
         ordered_blocks = []
-        for ch_no in range(1, 6):
-            ch_id = f"kboglobal{ch_no}"
+        for ch_id in channel_order:
             if ch_id in kbo_blocks:
                 ordered_blocks.extend(kbo_blocks[ch_id])
         new_lines[first_idx:first_idx] = ordered_blocks
@@ -837,6 +871,8 @@ def _update_alive_yaml() -> tuple[bool, str]:
         msg_parts.append(f"업데이트 {updated}개")
     if added:
         msg_parts.append(f"추가 {added}개")
+    if removed:
+        msg_parts.append(f"제거 {removed}개")
     msg = ", ".join(msg_parts) or "변경 없음"
     logger.info("[SOOP_KBO] alive.yaml %s", msg)
     return True, msg
@@ -995,6 +1031,7 @@ class ModuleMain(PluginModuleBase):
             "stream_base_url": "",
             "plex_section_id": "",
             "alive_update_enable": "False",
+            "alive_only_onair": "False",
             "alive_yaml_path": "",
         }
         # db_default는 최초 설치 시에만 동작 → 업그레이드 시 누락 키 보완
@@ -1006,6 +1043,7 @@ class ModuleMain(PluginModuleBase):
             ("channel_list_cache", ""),
             ("channel_list_updated_at", ""),
             ("alive_update_enable", "False"),
+            ("alive_only_onair", "False"),
             ("alive_yaml_path", ""),
         ]
         try:
